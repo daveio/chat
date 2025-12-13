@@ -541,7 +541,7 @@ function App() {
             </div>
           </ScrollArea>
 
-          <div className="p-6 border-t border-border">
+          <div className="p-6 border-t border-border space-y-4">
             <div className="flex gap-2">
               <Input
                 ref={inputRef}
@@ -564,6 +564,13 @@ function App() {
               >
                 <PaperPlaneRight size={18} weight="fill" />
               </Button>
+            </div>
+            
+            <div className="bg-muted/30 rounded-lg p-3 border border-border/50">
+              <p className="text-xs font-mono text-muted-foreground mb-2 uppercase tracking-wide">Monitor Traffic (MQTT CLI)</p>
+              <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
+                mosquitto_sub -h test.mosquitto.org -p 8081 -t "spark-chat-room/#" -v
+              </code>
             </div>
           </div>
         </Card>
