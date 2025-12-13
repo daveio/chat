@@ -566,11 +566,29 @@ function App() {
               </Button>
             </div>
             
-            <div className="bg-muted/30 rounded-lg p-3 border border-border/50">
-              <p className="text-xs font-mono text-muted-foreground mb-2 uppercase tracking-wide">Monitor Traffic (MQTT CLI)</p>
-              <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
-                mosquitto_sub -h test.mosquitto.org -p 8081 -t "spark-chat-room/#" -v
-              </code>
+            <div className="bg-muted/30 rounded-lg p-3 border border-border/50 space-y-3">
+              <p className="text-xs font-mono text-muted-foreground uppercase tracking-wide">Monitor Traffic (MQTT CLI)</p>
+              
+              <div>
+                <p className="text-[10px] font-mono text-muted-foreground/80 mb-1 uppercase tracking-wider">Mosquitto CLI</p>
+                <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
+                  mosquitto_sub -h test.mosquitto.org -p 8081 -t "spark-chat-room/#" -v
+                </code>
+              </div>
+              
+              <div>
+                <p className="text-[10px] font-mono text-muted-foreground/80 mb-1 uppercase tracking-wider">MQTTX CLI</p>
+                <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
+                  mqttx sub -h test.mosquitto.org -p 8081 -t "spark-chat-room/#" -v
+                </code>
+              </div>
+              
+              <div>
+                <p className="text-[10px] font-mono text-muted-foreground/80 mb-1 uppercase tracking-wider">HiveMQ MQTT CLI</p>
+                <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
+                  mqtt sub -h test.mosquitto.org -p 8081 -t "spark-chat-room/#" -V
+                </code>
+              </div>
             </div>
           </div>
         </Card>
