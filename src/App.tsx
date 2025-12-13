@@ -20,7 +20,7 @@ type Message = {
   timestamp: number
 }
 
-const BROKER_URL = 'ws://broker.emqx.io:8083/mqtt'
+const BROKER_URL = 'wss://test.mosquitto.org:8081'
 const CHAT_TOPIC = 'spark-chat-room/messages'
 
 function App() {
