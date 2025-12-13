@@ -42,10 +42,16 @@ type PublicKeyAnnouncement = {
   timestamp: number
 }
 
+type PublicKeyRequest = {
+  requesterId: string
+  timestamp: number
+}
+
 const BROKER_URL = 'wss://test.mosquitto.org:8081'
 const CHAT_TOPIC = 'spark-chat-room/messages'
 const TYPING_TOPIC = 'spark-chat-room/typing'
 const PUBKEY_TOPIC = 'spark-chat-room/pubkeys'
+const PUBKEY_REQUEST_TOPIC = 'spark-chat-room/pubkey-request'
 const TYPING_TIMEOUT = 3000
 
 function App() {
@@ -61,6 +67,7 @@ function App() {
   const [myPublicKeyString, setMyPublicKeyString] = useState<SerializedPublicKey>('')
   const [peerPublicKeys, setPeerPublicKeys] = useState<Map<string, { key: CryptoKey; serialized: SerializedPublicKey }>>(new Map())
   const [isGeneratingKeys, setIsGeneratingKeys] = useState(true)
+  const [myClientId, setMyClientId] = useState<string>('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
@@ -127,6 +134,7 @@ function App() {
     setConnectionStatus('connecting')
     
     const clientId = `mqtt-chat-${Math.random().toString(16).substring(2, 10)}`
+    setMyClientId(clientId)
     const mqttClient = mqtt.connect(BROKER_URL, {
       clientId,
       clean: true,
@@ -135,11 +143,12 @@ function App() {
 
     mqttClient.on('connect', () => {
       setConnectionStatus('connected')
-      mqttClient.subscribe([CHAT_TOPIC, TYPING_TOPIC, PUBKEY_TOPIC], (err) => {
+      mqttClient.subscribe([CHAT_TOPIC, TYPING_TOPIC, PUBKEY_TOPIC, PUBKEY_REQUEST_TOPIC], (err) => {
         if (err) {
           console.error('Subscription error:', err)
         } else {
           announcePublicKey(mqttClient)
+          requestPublicKeys(mqttClient, clientId)
         }
       })
     })
@@ -222,6 +231,15 @@ function App() {
         } catch (error) {
           console.error('Failed to process public key announcement:', error)
         }
+      } else if (topic === PUBKEY_REQUEST_TOPIC) {
+        try {
+          const request: PublicKeyRequest = JSON.parse(payload.toString())
+          if (request.requesterId !== clientId) {
+            announcePublicKey(mqttClient)
+          }
+        } catch (error) {
+          console.error('Failed to process public key request:', error)
+        }
       }
     })
 
@@ -251,6 +269,15 @@ function App() {
     }
 
     mqttClient.publish(PUBKEY_TOPIC, JSON.stringify(announcement), { qos: 0 })
+  }
+
+  const requestPublicKeys = (mqttClient: MqttClient, clientId: string) => {
+    const request: PublicKeyRequest = {
+      requesterId: clientId,
+      timestamp: Date.now(),
+    }
+
+    mqttClient.publish(PUBKEY_REQUEST_TOPIC, JSON.stringify(request), { qos: 0 })
   }
 
   const emitTypingStatus = (isTyping: boolean) => {
