@@ -12,26 +12,40 @@ This is a real-time messaging application with connection management, message hi
 
 ## Essential Features
 
+### Encryption Key Generation
+- **Functionality**: Generate ECDH P-256 keypair on app initialization for end-to-end encryption
+- **Purpose**: Enable secure, authenticated message encryption between all chat participants
+- **Trigger**: Automatic on app load before MQTT connection
+- **Progression**: App loads → Generate ECDH keypair → Export public key → Show loading screen → Initialize MQTT connection
+- **Success criteria**: Keypair generated within 500ms, public key ready for distribution, UI shows "E2EE" badge
+
+### Public Key Exchange
+- **Functionality**: Announce and collect public keys from all chat participants
+- **Purpose**: Enable message encryption to multiple recipients without exposing private keys
+- **Trigger**: On MQTT connection and when new typing events are received
+- **Progression**: Connect to MQTT → Subscribe to pubkey topic → Announce own public key → Receive peer public keys → Store imported keys
+- **Success criteria**: All active participants' public keys are collected and stored for encryption
+
 ### MQTT Connection Management
-- **Functionality**: Establish and maintain WebSocket connection to broker.emqx.io:8083/8084
+- **Functionality**: Establish and maintain WebSocket connection to test.mosquitto.org:8081
 - **Purpose**: Enable real-time bidirectional communication between all chat participants
-- **Trigger**: Automatic connection on app load with manual reconnect option
-- **Progression**: App loads → Generate unique client ID → Connect to broker → Subscribe to chat topic → Display connection status → Enable message input
-- **Success criteria**: Connection indicator shows "Connected" and user can send/receive messages; disconnection shows clear error state
+- **Trigger**: Automatic connection after keypair generation with manual reconnect option
+- **Progression**: Keys generated → Generate unique client ID → Connect to broker → Subscribe to chat/typing/pubkey topics → Announce public key → Display connection status → Enable message input
+- **Success criteria**: Connection indicator shows "Connected" and user can send/receive encrypted messages; disconnection shows clear error state
 
-### Message Publishing
-- **Functionality**: Send messages to the MQTT topic that all participants subscribe to
-- **Purpose**: Allow users to broadcast their messages to the entire chat room
+### Encrypted Message Publishing
+- **Functionality**: Encrypt and send messages to all known participants using AES-GCM AEAD
+- **Purpose**: Ensure only intended recipients can read messages, with tamper protection
 - **Trigger**: User types message and presses Enter or clicks Send button
-- **Progression**: User types message → Presses Enter/Send → Message published to MQTT topic → Message appears in local chat → Input cleared
-- **Success criteria**: Message appears in chat feed within 100ms, input is cleared, and other clients receive the message
+- **Progression**: User types message → Presses Enter/Send → Collect all peer public keys → Derive shared keys via ECDH → Encrypt with AES-GCM for each recipient → Publish encrypted payload to MQTT → Add plaintext to local view → Input cleared
+- **Success criteria**: Message encrypted for all peers, appears in local chat within 100ms, encrypted data published to MQTT, other clients can decrypt
 
-### Message Subscription & Display
-- **Functionality**: Receive and display all messages published to the chat topic
-- **Purpose**: Show the conversation history and real-time updates from all participants
-- **Trigger**: Messages arrive via MQTT subscription
-- **Progression**: MQTT message received → Parse message payload → Add timestamp if needed → Append to message list → Auto-scroll to latest message
-- **Success criteria**: All messages appear in chronological order with sender identification and timestamps
+### Encrypted Message Reception & Decryption
+- **Functionality**: Receive and decrypt messages using ECDH shared key derivation and AES-GCM
+- **Purpose**: Display decrypted conversation history from authenticated senders
+- **Trigger**: Encrypted messages arrive via MQTT subscription
+- **Progression**: MQTT message received → Parse encrypted payload → Verify sender public key → Derive shared key → Decrypt with AES-GCM → Verify authentication tag → Display plaintext → Auto-scroll to latest message
+- **Success criteria**: All messages decrypted successfully, appear in chronological order with sender identification, failed decryption handled gracefully
 
 ### Username Customization
 - **Functionality**: Allow users to set a display name for their messages
@@ -48,27 +62,31 @@ This is a real-time messaging application with connection management, message hi
 - **Success criteria**: Users can always see their connection status and understand what it means
 
 ### Typing Indicators
-- **Functionality**: Display real-time indicators when other users are composing messages
+- **Functionality**: Display real-time indicators when other users are composing messages, includes public key for new participants
 - **Purpose**: Create a more engaging, conversational experience by showing active participation
 - **Trigger**: User begins typing in the message input field
-- **Progression**: User types → Typing event published to MQTT → Other clients receive event → Animated indicator appears below messages → Indicator disappears after 3s of inactivity or when message is sent
-- **Success criteria**: Typing indicators appear within 100ms of typing start, display correct usernames, and automatically clear after timeout
+- **Progression**: User types → Typing event with public key published to MQTT → Other clients receive event → Import public key if new → Animated indicator appears below messages → Indicator disappears after 3s of inactivity or when message is sent
+- **Success criteria**: Typing indicators appear within 100ms of typing start, display correct usernames, automatically clear after timeout, public keys collected from typing events
 
 ## Edge Case Handling
 
-- **Connection Failures** - Display clear error message with reconnect button; queue messages locally until reconnected
+- **Connection Failures** - Display clear error message with reconnect button; clear peer keys on reconnect to re-establish encrypted channels
 - **Empty Messages** - Disable send button when input is empty to prevent blank messages
 - **Long Messages** - Word-wrap messages that exceed container width; consider character limit
 - **Duplicate Messages** - Use message IDs to prevent showing the same message multiple times
 - **Username Not Set** - Default to "Anonymous" + random ID if user hasn't set a username
-- **Network Instability** - Auto-reconnect with exponential backoff; show "Reconnecting..." status
+- **Network Instability** - Auto-reconnect with exponential backoff; show "Reconnecting..." status; re-announce public key on reconnect
 - **Rapid Message Sending** - No artificial rate limiting but show sending state feedback
 - **Multiple Typing Users** - Display up to 3 usernames, then "X others are typing..."
 - **Stale Typing Indicators** - Automatically clear typing status after 3 seconds of inactivity
+- **Decryption Failures** - Silently skip messages that can't be decrypted (wrong key or corrupted); log errors to console
+- **Late Joiners** - Users joining after messages were sent won't see prior messages (no server-side history); only messages encrypted for them are visible
+- **Missing Public Keys** - If sender's public key is unknown, attempt to import from message payload; skip messages that can't be decrypted
+- **Key Generation Delays** - Show loading screen during keypair generation; prevent MQTT connection until keys are ready
 
 ## Design Direction
 
-The design should evoke feelings of speed, modernity, and digital communication - think retro terminal aesthetics meets contemporary messaging. The interface should feel tech-forward with strong visual indicators for connection status and message flow.
+The design should evoke feelings of speed, modernity, security, and digital communication - think retro terminal aesthetics meets contemporary encrypted messaging. The interface should feel tech-forward with strong visual indicators for connection status, encryption status, and message flow. The addition of end-to-end encryption brings a sense of privacy and trustworthiness to the experience.
 
 ## Color Selection
 
@@ -129,6 +147,7 @@ Animations should emphasize the real-time nature of the chat while maintaining s
   - WifiHigh/WifiSlash (connection status)
   - UserCircle (username/profile)
   - ArrowClockwise (reconnect)
+  - LockKey (encryption status and key generation)
   
 - **Spacing**: 
   - Container padding: p-6

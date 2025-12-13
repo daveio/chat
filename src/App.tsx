@@ -8,8 +8,9 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
-import { PaperPlaneRight, WifiHigh, WifiSlash, UserCircle, ArrowClockwise } from '@phosphor-icons/react'
+import { PaperPlaneRight, WifiHigh, WifiSlash, UserCircle, ArrowClockwise, LockKey } from '@phosphor-icons/react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { generateKeyPair, exportPublicKey, importPublicKey, encryptMessage, decryptMessage, type KeyPair, type SerializedPublicKey } from '@/lib/crypto'
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
@@ -20,15 +21,31 @@ type Message = {
   timestamp: number
 }
 
+type EncryptedMessage = {
+  id: string
+  username: string
+  encrypted: { [recipientKey: string]: string }
+  timestamp: number
+  senderPublicKey: SerializedPublicKey
+}
+
 type TypingEvent = {
   username: string
   isTyping: boolean
+  timestamp: number
+  publicKey: SerializedPublicKey
+}
+
+type PublicKeyAnnouncement = {
+  username: string
+  publicKey: SerializedPublicKey
   timestamp: number
 }
 
 const BROKER_URL = 'wss://test.mosquitto.org:8081'
 const CHAT_TOPIC = 'spark-chat-room/messages'
 const TYPING_TOPIC = 'spark-chat-room/typing'
+const PUBKEY_TOPIC = 'spark-chat-room/pubkeys'
 const TYPING_TIMEOUT = 3000
 
 function App() {
@@ -40,12 +57,28 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected')
   const [client, setClient] = useState<MqttClient | null>(null)
   const [typingUsers, setTypingUsers] = useState<Map<string, number>>(new Map())
+  const [myKeyPair, setMyKeyPair] = useState<KeyPair | null>(null)
+  const [myPublicKeyString, setMyPublicKeyString] = useState<SerializedPublicKey>('')
+  const [peerPublicKeys, setPeerPublicKeys] = useState<Map<string, { key: CryptoKey; serialized: SerializedPublicKey }>>(new Map())
+  const [isGeneratingKeys, setIsGeneratingKeys] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const lastTypingEmitRef = useRef<number>(0)
 
   const displayUsername = username || `Anonymous-${Math.random().toString(36).substring(2, 7)}`
+
+  useEffect(() => {
+    const initKeyPair = async () => {
+      setIsGeneratingKeys(true)
+      const keyPair = await generateKeyPair()
+      const publicKeyString = await exportPublicKey(keyPair.publicKey)
+      setMyKeyPair(keyPair)
+      setMyPublicKeyString(publicKeyString)
+      setIsGeneratingKeys(false)
+    }
+    initKeyPair()
+  }, [])
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -73,13 +106,14 @@ function App() {
   }, [username, setUsername])
 
   useEffect(() => {
+    if (!myKeyPair || !myPublicKeyString || isGeneratingKeys) return
     connectToMQTT()
     return () => {
       if (client) {
         client.end()
       }
     }
-  }, [])
+  }, [myKeyPair, myPublicKeyString, isGeneratingKeys])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -88,6 +122,8 @@ function App() {
   }, [messages])
 
   const connectToMQTT = () => {
+    if (!myKeyPair || !myPublicKeyString) return
+
     setConnectionStatus('connecting')
     
     const clientId = `mqtt-chat-${Math.random().toString(16).substring(2, 10)}`
@@ -99,29 +135,67 @@ function App() {
 
     mqttClient.on('connect', () => {
       setConnectionStatus('connected')
-      mqttClient.subscribe([CHAT_TOPIC, TYPING_TOPIC], (err) => {
+      mqttClient.subscribe([CHAT_TOPIC, TYPING_TOPIC, PUBKEY_TOPIC], (err) => {
         if (err) {
           console.error('Subscription error:', err)
+        } else {
+          announcePublicKey(mqttClient)
         }
       })
     })
 
-    mqttClient.on('message', (topic, payload) => {
+    mqttClient.on('message', async (topic, payload) => {
       if (topic === CHAT_TOPIC) {
         try {
-          const message: Message = JSON.parse(payload.toString())
+          const encryptedMsg: EncryptedMessage = JSON.parse(payload.toString())
+          
+          if (encryptedMsg.username === displayUsername) {
+            return
+          }
+
+          let senderPublicKey = peerPublicKeys.get(encryptedMsg.senderPublicKey)?.key
+          if (!senderPublicKey) {
+            senderPublicKey = await importPublicKey(encryptedMsg.senderPublicKey)
+            setPeerPublicKeys((current) => new Map(current).set(encryptedMsg.senderPublicKey, {
+              key: senderPublicKey!,
+              serialized: encryptedMsg.senderPublicKey,
+            }))
+          }
+
+          const encryptedForMe = encryptedMsg.encrypted[myPublicKeyString]
+          if (!encryptedForMe) {
+            return
+          }
+
+          const decryptedText = await decryptMessage(encryptedForMe, myKeyPair!.privateKey, senderPublicKey)
+          
+          const message: Message = {
+            id: encryptedMsg.id,
+            username: encryptedMsg.username,
+            text: decryptedText,
+            timestamp: encryptedMsg.timestamp,
+          }
+
           setMessages((current) => {
             const exists = current.some(m => m.id === message.id)
             if (exists) return current
             return [...current, message]
           })
         } catch (error) {
-          console.error('Failed to parse message:', error)
+          console.error('Failed to decrypt message:', error)
         }
       } else if (topic === TYPING_TOPIC) {
         try {
           const typingEvent: TypingEvent = JSON.parse(payload.toString())
           if (typingEvent.username !== displayUsername) {
+            if (typingEvent.isTyping && !peerPublicKeys.has(typingEvent.publicKey)) {
+              const pubKey = await importPublicKey(typingEvent.publicKey)
+              setPeerPublicKeys((current) => new Map(current).set(typingEvent.publicKey, {
+                key: pubKey,
+                serialized: typingEvent.publicKey,
+              }))
+            }
+
             setTypingUsers((current) => {
               const updated = new Map(current)
               if (typingEvent.isTyping) {
@@ -134,6 +208,19 @@ function App() {
           }
         } catch (error) {
           console.error('Failed to parse typing event:', error)
+        }
+      } else if (topic === PUBKEY_TOPIC) {
+        try {
+          const announcement: PublicKeyAnnouncement = JSON.parse(payload.toString())
+          if (announcement.username !== displayUsername && !peerPublicKeys.has(announcement.publicKey)) {
+            const pubKey = await importPublicKey(announcement.publicKey)
+            setPeerPublicKeys((current) => new Map(current).set(announcement.publicKey, {
+              key: pubKey,
+              serialized: announcement.publicKey,
+            }))
+          }
+        } catch (error) {
+          console.error('Failed to process public key announcement:', error)
         }
       }
     })
@@ -154,13 +241,26 @@ function App() {
     setClient(mqttClient)
   }
 
+  const announcePublicKey = (mqttClient: MqttClient) => {
+    if (!myPublicKeyString) return
+
+    const announcement: PublicKeyAnnouncement = {
+      username: displayUsername,
+      publicKey: myPublicKeyString,
+      timestamp: Date.now(),
+    }
+
+    mqttClient.publish(PUBKEY_TOPIC, JSON.stringify(announcement), { qos: 0 })
+  }
+
   const emitTypingStatus = (isTyping: boolean) => {
-    if (!client || connectionStatus !== 'connected') return
+    if (!client || connectionStatus !== 'connected' || !myPublicKeyString) return
 
     const typingEvent: TypingEvent = {
       username: displayUsername,
       isTyping,
       timestamp: Date.now(),
+      publicKey: myPublicKeyString,
     }
 
     client.publish(TYPING_TOPIC, JSON.stringify(typingEvent), { qos: 0 })
@@ -186,26 +286,46 @@ function App() {
     }
   }
 
-  const handleSendMessage = () => {
-    if (!inputMessage.trim() || !client || connectionStatus !== 'connected') return
+  const handleSendMessage = async () => {
+    if (!inputMessage.trim() || !client || connectionStatus !== 'connected' || !myKeyPair || !myPublicKeyString) return
 
     emitTypingStatus(false)
     if (typingTimeoutRef.current) {
       clearTimeout(typingTimeoutRef.current)
     }
 
-    const message: Message = {
+    const recipientKeys = Array.from(peerPublicKeys.values()).map(p => p.key)
+    recipientKeys.push(myKeyPair.publicKey)
+
+    const encrypted = await encryptMessage(inputMessage.trim(), myKeyPair.privateKey, recipientKeys)
+
+    const encryptedByPublicKey: { [key: string]: string } = {}
+    Array.from(peerPublicKeys.values()).forEach((peer, idx) => {
+      encryptedByPublicKey[peer.serialized] = encrypted[idx]
+    })
+    encryptedByPublicKey[myPublicKeyString] = encrypted[recipientKeys.length - 1]
+
+    const encryptedMsg: EncryptedMessage = {
       id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       username: displayUsername,
-      text: inputMessage.trim(),
+      encrypted: encryptedByPublicKey,
       timestamp: Date.now(),
+      senderPublicKey: myPublicKeyString,
     }
 
-    client.publish(CHAT_TOPIC, JSON.stringify(message), { qos: 0 }, (err) => {
+    client.publish(CHAT_TOPIC, JSON.stringify(encryptedMsg), { qos: 0 }, (err) => {
       if (err) {
         console.error('Publish error:', err)
       }
     })
+
+    const message: Message = {
+      id: encryptedMsg.id,
+      username: displayUsername,
+      text: inputMessage.trim(),
+      timestamp: encryptedMsg.timestamp,
+    }
+    setMessages((current) => [...current, message])
 
     setInputMessage('')
     inputRef.current?.focus()
@@ -215,6 +335,7 @@ function App() {
     if (client) {
       client.end(true)
     }
+    setPeerPublicKeys(new Map())
     connectToMQTT()
   }
 
@@ -287,144 +408,166 @@ function App() {
 
   return (
     <div className="min-h-screen bg-background p-4 md:p-6 flex items-center justify-center">
-      <Card className="w-full max-w-4xl h-[90vh] flex flex-col bg-card border-border shadow-2xl">
-        <div className="p-6 border-b border-border flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <h1 className="text-2xl font-bold font-mono tracking-tight text-primary">
-              MQTT.CHAT
-            </h1>
-            <Separator orientation="vertical" className="h-6" />
-            <div className="flex items-center gap-2">
-              {editingUsername ? (
-                <Input
-                  value={tempUsername}
-                  onChange={(e) => setTempUsername(e.target.value)}
-                  onBlur={handleUsernameSave}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleUsernameSave()
-                    if (e.key === 'Escape') setEditingUsername(false)
-                  }}
-                  autoFocus
-                  className="h-8 w-40 bg-background border-accent"
-                />
-              ) : (
-                <button
-                  onClick={handleUsernameEdit}
-                  className="flex items-center gap-2 hover:text-accent transition-colors"
+      {isGeneratingKeys ? (
+        <Card className="w-full max-w-md p-8 bg-card border-border shadow-2xl">
+          <div className="flex flex-col items-center gap-4 text-center">
+            <motion.div
+              animate={{ rotate: 360 }}
+              transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+            >
+              <LockKey size={48} className="text-accent" weight="fill" />
+            </motion.div>
+            <h2 className="text-xl font-bold font-mono text-primary">Generating Keys</h2>
+            <p className="text-sm text-muted-foreground font-mono">
+              Creating your encryption keypair using ECDH P-256...
+            </p>
+          </div>
+        </Card>
+      ) : (
+        <Card className="w-full max-w-4xl h-[90vh] flex flex-col bg-card border-border shadow-2xl">
+          <div className="p-6 border-b border-border flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <h1 className="text-2xl font-bold font-mono tracking-tight text-primary">
+                MQTT.CHAT
+              </h1>
+              <Separator orientation="vertical" className="h-6" />
+              <div className="flex items-center gap-2">
+                {editingUsername ? (
+                  <Input
+                    value={tempUsername}
+                    onChange={(e) => setTempUsername(e.target.value)}
+                    onBlur={handleUsernameSave}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleUsernameSave()
+                      if (e.key === 'Escape') setEditingUsername(false)
+                    }}
+                    autoFocus
+                    className="h-8 w-40 bg-background border-accent"
+                  />
+                ) : (
+                  <button
+                    onClick={handleUsernameEdit}
+                    className="flex items-center gap-2 hover:text-accent transition-colors"
+                  >
+                    <UserCircle size={20} weight="fill" className="text-muted-foreground" />
+                    <span className="text-sm font-medium font-mono">{displayUsername}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <Badge className="bg-green-500/20 text-green-400 border-green-500/30 font-mono uppercase text-xs tracking-wide">
+                <LockKey className="mr-1.5" weight="fill" size={14} />
+                E2EE
+              </Badge>
+              {getStatusBadge()}
+              {connectionStatus !== 'connected' && (
+                <Button
+                  onClick={handleReconnect}
+                  size="sm"
+                  variant="outline"
+                  className="font-mono text-xs"
                 >
-                  <UserCircle size={20} weight="fill" className="text-muted-foreground" />
-                  <span className="text-sm font-medium font-mono">{displayUsername}</span>
-                </button>
+                  <ArrowClockwise size={14} className="mr-1.5" />
+                  Reconnect
+                </Button>
               )}
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            {getStatusBadge()}
-            {connectionStatus !== 'connected' && (
-              <Button
-                onClick={handleReconnect}
-                size="sm"
-                variant="outline"
-                className="font-mono text-xs"
-              >
-                <ArrowClockwise size={14} className="mr-1.5" />
-                Reconnect
-              </Button>
-            )}
-          </div>
-        </div>
 
-        <ScrollArea className="flex-1 p-6">
-          <div ref={scrollRef} className="space-y-3">
-            <AnimatePresence initial={false}>
-              {messages.map((message) => (
-                <motion.div
-                  key={message.id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.2 }}
-                  className="flex gap-3"
-                >
-                  <div className={`w-8 h-8 rounded-full ${getAvatarColor(message.username)} flex items-center justify-center text-white font-bold text-sm flex-shrink-0`}>
-                    {message.username.charAt(0).toUpperCase()}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline gap-2 mb-1">
-                      <span className="font-medium font-mono text-sm text-foreground">
-                        {message.username}
-                      </span>
-                      <span className="text-xs font-mono text-muted-foreground tracking-wide">
-                        {formatTimestamp(message.timestamp)}
-                      </span>
+          <ScrollArea className="flex-1 p-6">
+            <div ref={scrollRef} className="space-y-3">
+              <AnimatePresence initial={false}>
+                {messages.map((message) => (
+                  <motion.div
+                    key={message.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex gap-3"
+                  >
+                    <div className={`w-8 h-8 rounded-full ${getAvatarColor(message.username)} flex items-center justify-center text-white font-bold text-sm flex-shrink-0`}>
+                      {message.username.charAt(0).toUpperCase()}
                     </div>
-                    <p className="text-foreground text-[15px] leading-relaxed break-words">
-                      {message.text}
-                    </p>
-                  </div>
-                </motion.div>
-              ))}
-            </AnimatePresence>
-            {messages.length === 0 && (
-              <div className="text-center text-muted-foreground py-12">
-                <p className="font-mono text-sm">No messages yet. Start the conversation!</p>
-              </div>
-            )}
-            {typingUsers.size > 0 && (
-              <motion.div
-                initial={{ opacity: 0, y: 5 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 5 }}
-                className="flex items-center gap-2 text-muted-foreground text-sm font-mono pl-11"
-              >
-                <div className="flex gap-1">
-                  <motion.span
-                    animate={{ opacity: [0.4, 1, 0.4] }}
-                    transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
-                    className="w-1.5 h-1.5 bg-accent rounded-full"
-                  />
-                  <motion.span
-                    animate={{ opacity: [0.4, 1, 0.4] }}
-                    transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut", delay: 0.2 }}
-                    className="w-1.5 h-1.5 bg-accent rounded-full"
-                  />
-                  <motion.span
-                    animate={{ opacity: [0.4, 1, 0.4] }}
-                    transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut", delay: 0.4 }}
-                    className="w-1.5 h-1.5 bg-accent rounded-full"
-                  />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-baseline gap-2 mb-1">
+                        <span className="font-medium font-mono text-sm text-foreground">
+                          {message.username}
+                        </span>
+                        <span className="text-xs font-mono text-muted-foreground tracking-wide">
+                          {formatTimestamp(message.timestamp)}
+                        </span>
+                      </div>
+                      <p className="text-foreground text-[15px] leading-relaxed break-words">
+                        {message.text}
+                      </p>
+                    </div>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+              {messages.length === 0 && (
+                <div className="text-center text-muted-foreground py-12">
+                  <p className="font-mono text-sm">No messages yet. Start the conversation!</p>
+                  <p className="font-mono text-xs mt-2 text-accent">All messages are end-to-end encrypted</p>
                 </div>
-                <span className="text-accent">{getTypingText()}</span>
-              </motion.div>
-            )}
-          </div>
-        </ScrollArea>
+              )}
+              {typingUsers.size > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 5 }}
+                  className="flex items-center gap-2 text-muted-foreground text-sm font-mono pl-11"
+                >
+                  <div className="flex gap-1">
+                    <motion.span
+                      animate={{ opacity: [0.4, 1, 0.4] }}
+                      transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
+                      className="w-1.5 h-1.5 bg-accent rounded-full"
+                    />
+                    <motion.span
+                      animate={{ opacity: [0.4, 1, 0.4] }}
+                      transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut", delay: 0.2 }}
+                      className="w-1.5 h-1.5 bg-accent rounded-full"
+                    />
+                    <motion.span
+                      animate={{ opacity: [0.4, 1, 0.4] }}
+                      transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut", delay: 0.4 }}
+                      className="w-1.5 h-1.5 bg-accent rounded-full"
+                    />
+                  </div>
+                  <span className="text-accent">{getTypingText()}</span>
+                </motion.div>
+              )}
+            </div>
+          </ScrollArea>
 
-        <div className="p-6 border-t border-border">
-          <div className="flex gap-2">
-            <Input
-              ref={inputRef}
-              value={inputMessage}
-              onChange={handleInputChange}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  handleSendMessage()
-                }
-              }}
-              placeholder={connectionStatus === 'connected' ? 'Type a message...' : 'Connecting...'}
-              disabled={connectionStatus !== 'connected'}
-              className="flex-1 bg-background border-input focus:ring-accent text-base md:text-[15px]"
-            />
-            <Button
-              onClick={handleSendMessage}
-              disabled={!inputMessage.trim() || connectionStatus !== 'connected'}
-              className="bg-accent hover:bg-accent/90 text-accent-foreground font-medium px-6 transition-all hover:scale-105 active:scale-95 disabled:opacity-50 disabled:scale-100"
-            >
-              <PaperPlaneRight size={18} weight="fill" />
-            </Button>
+          <div className="p-6 border-t border-border">
+            <div className="flex gap-2">
+              <Input
+                ref={inputRef}
+                value={inputMessage}
+                onChange={handleInputChange}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    handleSendMessage()
+                  }
+                }}
+                placeholder={connectionStatus === 'connected' ? 'Type a message...' : 'Connecting...'}
+                disabled={connectionStatus !== 'connected'}
+                className="flex-1 bg-background border-input focus:ring-accent text-base md:text-[15px]"
+              />
+              <Button
+                onClick={handleSendMessage}
+                disabled={!inputMessage.trim() || connectionStatus !== 'connected'}
+                className="bg-accent hover:bg-accent/90 text-accent-foreground font-medium px-6 transition-all hover:scale-105 active:scale-95 disabled:opacity-50 disabled:scale-100"
+              >
+                <PaperPlaneRight size={18} weight="fill" />
+              </Button>
+            </div>
           </div>
-        </div>
-      </Card>
+        </Card>
+      )}
     </div>
   )
 }
