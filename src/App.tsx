@@ -11,6 +11,9 @@ import { Separator } from '@/components/ui/separator'
 import { PaperPlaneRight, WifiHigh, WifiSlash, UserCircle, ArrowClockwise, LockKey } from '@phosphor-icons/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { generateKeyPair, exportPublicKey, importPublicKey, encryptMessage, decryptMessage, type KeyPair, type SerializedPublicKey } from '@/lib/crypto'
+import { ServerSettings, type ServerConfig } from '@/components/ServerSettings'
+import { PeerList, type PeerStatus } from '@/components/PeerList'
+import { MessageReceipts, type MessageReceipt, type ReceiptStatus } from '@/components/MessageReceipts'
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
@@ -19,6 +22,7 @@ type Message = {
   username: string
   text: string
   timestamp: number
+  receipts?: Map<string, MessageReceipt>
 }
 
 type EncryptedMessage = {
@@ -47,14 +51,24 @@ type PublicKeyRequest = {
   timestamp: number
 }
 
-const BROKER_URL = 'wss://test.mosquitto.org:8081'
-const CHAT_TOPIC = 'spark-chat-room/messages'
-const TYPING_TOPIC = 'spark-chat-room/typing'
-const PUBKEY_TOPIC = 'spark-chat-room/pubkeys'
-const PUBKEY_REQUEST_TOPIC = 'spark-chat-room/pubkey-request'
+type DeliveryReceipt = {
+  messageId: string
+  username: string
+  status: ReceiptStatus
+  timestamp: number
+}
+
+const DEFAULT_BROKER_URL = 'wss://test.mosquitto.org:8081'
+const DEFAULT_PORT = 8081
+const DEFAULT_TOPIC_PREFIX = 'spark-chat-room'
 const TYPING_TIMEOUT = 3000
 
 function App() {
+  const [serverConfig, setServerConfig] = useKV<ServerConfig>('mqtt-server-config', {
+    brokerUrl: DEFAULT_BROKER_URL,
+    port: DEFAULT_PORT,
+    topicPrefix: DEFAULT_TOPIC_PREFIX,
+  })
   const [username, setUsername] = useKV('mqtt-chat-username', '')
   const [editingUsername, setEditingUsername] = useState(false)
   const [tempUsername, setTempUsername] = useState('')
@@ -66,6 +80,7 @@ function App() {
   const [myKeyPair, setMyKeyPair] = useState<KeyPair | null>(null)
   const [myPublicKeyString, setMyPublicKeyString] = useState<SerializedPublicKey>('')
   const [peerPublicKeys, setPeerPublicKeys] = useState<Map<string, { key: CryptoKey; serialized: SerializedPublicKey }>>(new Map())
+  const [peers, setPeers] = useState<Map<string, PeerStatus>>(new Map())
   const [isGeneratingKeys, setIsGeneratingKeys] = useState(true)
   const [myClientId, setMyClientId] = useState<string>('')
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -74,6 +89,18 @@ function App() {
   const lastTypingEmitRef = useRef<number>(0)
 
   const displayUsername = username || `Anonymous-${Math.random().toString(36).substring(2, 7)}`
+
+  const config = serverConfig || {
+    brokerUrl: DEFAULT_BROKER_URL,
+    port: DEFAULT_PORT,
+    topicPrefix: DEFAULT_TOPIC_PREFIX,
+  }
+
+  const CHAT_TOPIC = `${config.topicPrefix}/messages`
+  const TYPING_TOPIC = `${config.topicPrefix}/typing`
+  const PUBKEY_TOPIC = `${config.topicPrefix}/pubkeys`
+  const PUBKEY_REQUEST_TOPIC = `${config.topicPrefix}/pubkey-request`
+  const RECEIPT_TOPIC = `${config.topicPrefix}/receipts`
 
   useEffect(() => {
     const initKeyPair = async () => {
@@ -135,7 +162,7 @@ function App() {
     
     const clientId = `mqtt-chat-${Math.random().toString(16).substring(2, 10)}`
     setMyClientId(clientId)
-    const mqttClient = mqtt.connect(BROKER_URL, {
+    const mqttClient = mqtt.connect(`${config.brokerUrl}:${config.port}`, {
       clientId,
       clean: true,
       reconnectPeriod: 5000,
@@ -143,7 +170,7 @@ function App() {
 
     mqttClient.on('connect', () => {
       setConnectionStatus('connected')
-      mqttClient.subscribe([CHAT_TOPIC, TYPING_TOPIC, PUBKEY_TOPIC, PUBKEY_REQUEST_TOPIC], (err) => {
+      mqttClient.subscribe([CHAT_TOPIC, TYPING_TOPIC, PUBKEY_TOPIC, PUBKEY_REQUEST_TOPIC, RECEIPT_TOPIC], (err) => {
         if (err) {
           console.error('Subscription error:', err)
         } else {
@@ -162,6 +189,18 @@ function App() {
             return
           }
 
+          setPeers((current) => {
+            const updated = new Map(current)
+            const existing = updated.get(encryptedMsg.username)
+            const hasKey = peerPublicKeys.has(encryptedMsg.senderPublicKey)
+            updated.set(encryptedMsg.username, {
+              username: encryptedMsg.username,
+              hasPublicKey: hasKey || existing?.hasPublicKey || false,
+              lastSeen: Date.now(),
+            })
+            return updated
+          })
+
           let senderPublicKey = peerPublicKeys.get(encryptedMsg.senderPublicKey)?.key
           if (!senderPublicKey) {
             senderPublicKey = await importPublicKey(encryptedMsg.senderPublicKey)
@@ -169,20 +208,32 @@ function App() {
               key: senderPublicKey!,
               serialized: encryptedMsg.senderPublicKey,
             }))
+            setPeers((current) => {
+              const updated = new Map(current)
+              const peer = updated.get(encryptedMsg.username)
+              if (peer) {
+                peer.hasPublicKey = true
+              }
+              return new Map(updated)
+            })
           }
 
           const encryptedForMe = encryptedMsg.encrypted[myPublicKeyString]
           if (!encryptedForMe) {
+            sendReceipt(mqttClient, encryptedMsg.id, 'received')
             return
           }
 
           const decryptedText = await decryptMessage(encryptedForMe, myKeyPair!.privateKey, senderPublicKey)
+          
+          sendReceipt(mqttClient, encryptedMsg.id, 'decrypted')
           
           const message: Message = {
             id: encryptedMsg.id,
             username: encryptedMsg.username,
             text: decryptedText,
             timestamp: encryptedMsg.timestamp,
+            receipts: new Map(),
           }
 
           setMessages((current) => {
@@ -197,12 +248,31 @@ function App() {
         try {
           const typingEvent: TypingEvent = JSON.parse(payload.toString())
           if (typingEvent.username !== displayUsername) {
+            setPeers((current) => {
+              const updated = new Map(current)
+              const hasKey = peerPublicKeys.has(typingEvent.publicKey)
+              updated.set(typingEvent.username, {
+                username: typingEvent.username,
+                hasPublicKey: hasKey,
+                lastSeen: Date.now(),
+              })
+              return updated
+            })
+
             if (typingEvent.isTyping && !peerPublicKeys.has(typingEvent.publicKey)) {
               const pubKey = await importPublicKey(typingEvent.publicKey)
               setPeerPublicKeys((current) => new Map(current).set(typingEvent.publicKey, {
                 key: pubKey,
                 serialized: typingEvent.publicKey,
               }))
+              setPeers((current) => {
+                const updated = new Map(current)
+                const peer = updated.get(typingEvent.username)
+                if (peer) {
+                  peer.hasPublicKey = true
+                }
+                return new Map(updated)
+              })
             }
 
             setTypingUsers((current) => {
@@ -221,12 +291,23 @@ function App() {
       } else if (topic === PUBKEY_TOPIC) {
         try {
           const announcement: PublicKeyAnnouncement = JSON.parse(payload.toString())
-          if (announcement.username !== displayUsername && !peerPublicKeys.has(announcement.publicKey)) {
-            const pubKey = await importPublicKey(announcement.publicKey)
-            setPeerPublicKeys((current) => new Map(current).set(announcement.publicKey, {
-              key: pubKey,
-              serialized: announcement.publicKey,
-            }))
+          if (announcement.username !== displayUsername) {
+            if (!peerPublicKeys.has(announcement.publicKey)) {
+              const pubKey = await importPublicKey(announcement.publicKey)
+              setPeerPublicKeys((current) => new Map(current).set(announcement.publicKey, {
+                key: pubKey,
+                serialized: announcement.publicKey,
+              }))
+            }
+            setPeers((current) => {
+              const updated = new Map(current)
+              updated.set(announcement.username, {
+                username: announcement.username,
+                hasPublicKey: true,
+                lastSeen: Date.now(),
+              })
+              return updated
+            })
           }
         } catch (error) {
           console.error('Failed to process public key announcement:', error)
@@ -239,6 +320,31 @@ function App() {
           }
         } catch (error) {
           console.error('Failed to process public key request:', error)
+        }
+      } else if (topic === RECEIPT_TOPIC) {
+        try {
+          const receipt: DeliveryReceipt = JSON.parse(payload.toString())
+          if (receipt.username !== displayUsername) {
+            setMessages((current) => {
+              return current.map(msg => {
+                if (msg.id === receipt.messageId) {
+                  const receipts = new Map(msg.receipts || new Map())
+                  const existing = receipts.get(receipt.username)
+                  if (!existing || receipt.status === 'decrypted') {
+                    receipts.set(receipt.username, {
+                      username: receipt.username,
+                      status: receipt.status,
+                      timestamp: receipt.timestamp,
+                    })
+                  }
+                  return { ...msg, receipts }
+                }
+                return msg
+              })
+            })
+          }
+        } catch (error) {
+          console.error('Failed to process delivery receipt:', error)
         }
       }
     })
@@ -278,6 +384,33 @@ function App() {
     }
 
     mqttClient.publish(PUBKEY_REQUEST_TOPIC, JSON.stringify(request), { qos: 0 })
+  }
+
+  const sendReceipt = (mqttClient: MqttClient, messageId: string, status: ReceiptStatus) => {
+    const receipt: DeliveryReceipt = {
+      messageId,
+      username: displayUsername,
+      status,
+      timestamp: Date.now(),
+    }
+
+    mqttClient.publish(RECEIPT_TOPIC, JSON.stringify(receipt), { qos: 0 })
+  }
+
+  const handleManualKeyRequest = () => {
+    if (!client || connectionStatus !== 'connected') return
+    requestPublicKeys(client, myClientId)
+  }
+
+  const handleServerConfigSave = (newConfig: ServerConfig) => {
+    setServerConfig(newConfig)
+    if (client) {
+      client.end(true)
+    }
+    setPeerPublicKeys(new Map())
+    setPeers(new Map())
+    setMessages([])
+    setTypingUsers(new Map())
   }
 
   const emitTypingStatus = (isTyping: boolean) => {
@@ -351,6 +484,7 @@ function App() {
       username: displayUsername,
       text: inputMessage.trim(),
       timestamp: encryptedMsg.timestamp,
+      receipts: new Map(),
     }
     setMessages((current) => [...current, message])
 
@@ -451,56 +585,62 @@ function App() {
           </div>
         </Card>
       ) : (
-        <Card className="w-full max-w-4xl h-[90vh] flex flex-col bg-card border-border shadow-2xl">
-          <div className="p-6 border-b border-border flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <h1 className="text-2xl font-bold font-mono tracking-tight text-primary">
-                MQTT.CHAT
-              </h1>
-              <Separator orientation="vertical" className="h-6" />
-              <div className="flex items-center gap-2">
-                {editingUsername ? (
-                  <Input
-                    value={tempUsername}
-                    onChange={(e) => setTempUsername(e.target.value)}
-                    onBlur={handleUsernameSave}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleUsernameSave()
-                      if (e.key === 'Escape') setEditingUsername(false)
-                    }}
-                    autoFocus
-                    className="h-8 w-40 bg-background border-accent"
-                  />
-                ) : (
-                  <button
-                    onClick={handleUsernameEdit}
-                    className="flex items-center gap-2 hover:text-accent transition-colors"
+        <div className="w-full max-w-6xl h-[90vh] flex gap-4">
+          <Card className="flex-1 flex flex-col bg-card border-border shadow-2xl">
+            <div className="p-6 border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <h1 className="text-2xl font-bold font-mono tracking-tight text-primary">
+                  MQTT.CHAT
+                </h1>
+                <Separator orientation="vertical" className="h-6" />
+                <div className="flex items-center gap-2">
+                  {editingUsername ? (
+                    <Input
+                      value={tempUsername}
+                      onChange={(e) => setTempUsername(e.target.value)}
+                      onBlur={handleUsernameSave}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleUsernameSave()
+                        if (e.key === 'Escape') setEditingUsername(false)
+                      }}
+                      autoFocus
+                      className="h-8 w-40 bg-background border-accent"
+                    />
+                  ) : (
+                    <button
+                      onClick={handleUsernameEdit}
+                      className="flex items-center gap-2 hover:text-accent transition-colors"
+                    >
+                      <UserCircle size={20} weight="fill" className="text-muted-foreground" />
+                      <span className="text-sm font-medium font-mono">{displayUsername}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <Badge className="bg-green-500/20 text-green-400 border-green-500/30 font-mono uppercase text-xs tracking-wide">
+                  <LockKey className="mr-1.5" weight="fill" size={14} />
+                  E2EE
+                </Badge>
+                {getStatusBadge()}
+                <ServerSettings
+                  config={config}
+                  onSave={handleServerConfigSave}
+                  disabled={connectionStatus === 'connecting'}
+                />
+                {connectionStatus !== 'connected' && (
+                  <Button
+                    onClick={handleReconnect}
+                    size="sm"
+                    variant="outline"
+                    className="font-mono text-xs"
                   >
-                    <UserCircle size={20} weight="fill" className="text-muted-foreground" />
-                    <span className="text-sm font-medium font-mono">{displayUsername}</span>
-                  </button>
+                    <ArrowClockwise size={14} className="mr-1.5" />
+                    Reconnect
+                  </Button>
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-3">
-              <Badge className="bg-green-500/20 text-green-400 border-green-500/30 font-mono uppercase text-xs tracking-wide">
-                <LockKey className="mr-1.5" weight="fill" size={14} />
-                E2EE
-              </Badge>
-              {getStatusBadge()}
-              {connectionStatus !== 'connected' && (
-                <Button
-                  onClick={handleReconnect}
-                  size="sm"
-                  variant="outline"
-                  className="font-mono text-xs"
-                >
-                  <ArrowClockwise size={14} className="mr-1.5" />
-                  Reconnect
-                </Button>
-              )}
-            </div>
-          </div>
 
           <ScrollArea className="flex-1 p-6">
             <div ref={scrollRef} className="space-y-3">
@@ -524,6 +664,12 @@ function App() {
                         <span className="text-xs font-mono text-muted-foreground tracking-wide">
                           {formatTimestamp(message.timestamp)}
                         </span>
+                        {message.username === displayUsername && (
+                          <MessageReceipts
+                            receipts={Array.from(message.receipts?.values() || [])}
+                            totalPeers={peers.size}
+                          />
+                        )}
                       </div>
                       <p className="text-foreground text-[15px] leading-relaxed break-words">
                         {message.text}
@@ -594,31 +740,50 @@ function App() {
             </div>
             
             <div className="bg-muted/30 rounded-lg p-3 border border-border/50 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-mono text-muted-foreground uppercase tracking-wide">Current Server</p>
+              </div>
+              <div className="text-xs font-mono text-accent">
+                <p>{config.brokerUrl}:{config.port}</p>
+                <p className="text-muted-foreground">Topic: {config.topicPrefix}/*</p>
+              </div>
+              
+              <Separator className="my-2" />
+              
               <p className="text-xs font-mono text-muted-foreground uppercase tracking-wide">Monitor Traffic (MQTT CLI)</p>
               
               <div>
                 <p className="text-[10px] font-mono text-muted-foreground/80 mb-1 uppercase tracking-wider">Mosquitto CLI</p>
                 <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
-                  mosquitto_sub -h test.mosquitto.org -p 8081 -t "spark-chat-room/#" -v
+                  mosquitto_sub -h test.mosquitto.org -p 8081 -t "{config.topicPrefix}/#" -v
                 </code>
               </div>
               
               <div>
                 <p className="text-[10px] font-mono text-muted-foreground/80 mb-1 uppercase tracking-wider">MQTTX CLI</p>
                 <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
-                  mqttx sub -h test.mosquitto.org -p 8081 -l wss --path /mqtt -t "spark-chat-room/#" -v
+                  mqttx sub -h test.mosquitto.org -p 8081 -l wss --path /mqtt -t '{config.topicPrefix}/#' -v
                 </code>
               </div>
               
               <div>
                 <p className="text-[10px] font-mono text-muted-foreground/80 mb-1 uppercase tracking-wider">HiveMQ MQTT CLI</p>
                 <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
-                  mqtt sub -h test.mosquitto.org -p 8081 -ws -ws:path /mqtt -s -t "spark-chat-room/#" -T -v
+                  mqtt sub -h test.mosquitto.org -p 8081 -ws -ws:path /mqtt -s -t '{config.topicPrefix}/#' -T -v
                 </code>
               </div>
             </div>
           </div>
-        </Card>
+          </Card>
+
+          <div className="w-80 flex flex-col gap-4">
+            <PeerList
+              peers={peers}
+              onRequestKeys={handleManualKeyRequest}
+              disabled={connectionStatus !== 'connected'}
+            />
+          </div>
+        </div>
       )}
     </div>
   )
