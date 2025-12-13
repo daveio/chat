@@ -579,14 +579,14 @@ function App() {
               <div>
                 <p className="text-[10px] font-mono text-muted-foreground/80 mb-1 uppercase tracking-wider">MQTTX CLI</p>
                 <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
-                  mqttx sub -h test.mosquitto.org -p 8081 -t "spark-chat-room/#" -v
+                  mqttx sub -h test.mosquitto.org -p 8081 -l wss --path /mqtt -t "spark-chat-room/#" -v
                 </code>
               </div>
               
               <div>
                 <p className="text-[10px] font-mono text-muted-foreground/80 mb-1 uppercase tracking-wider">HiveMQ MQTT CLI</p>
                 <code className="text-xs font-mono text-accent bg-background/50 px-2 py-1 rounded block overflow-x-auto whitespace-nowrap">
-                  mqtt sub -h test.mosquitto.org -p 8081 -t "spark-chat-room/#" -V
+                  mqtt sub -h test.mosquitto.org -p 8081 -ws -ws:path /mqtt -s -t "spark-chat-room/#" -T -v
                 </code>
               </div>
             </div>
