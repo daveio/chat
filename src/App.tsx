@@ -20,8 +20,16 @@ type Message = {
   timestamp: number
 }
 
+type TypingEvent = {
+  username: string
+  isTyping: boolean
+  timestamp: number
+}
+
 const BROKER_URL = 'wss://test.mosquitto.org:8081'
 const CHAT_TOPIC = 'spark-chat-room/messages'
+const TYPING_TOPIC = 'spark-chat-room/typing'
+const TYPING_TIMEOUT = 3000
 
 function App() {
   const [username, setUsername] = useKV('mqtt-chat-username', '')
@@ -31,10 +39,32 @@ function App() {
   const [inputMessage, setInputMessage] = useState('')
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected')
   const [client, setClient] = useState<MqttClient | null>(null)
+  const [typingUsers, setTypingUsers] = useState<Map<string, number>>(new Map())
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const lastTypingEmitRef = useRef<number>(0)
 
   const displayUsername = username || `Anonymous-${Math.random().toString(36).substring(2, 7)}`
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now()
+      setTypingUsers((current) => {
+        const updated = new Map(current)
+        let changed = false
+        for (const [user, timestamp] of updated.entries()) {
+          if (now - timestamp > TYPING_TIMEOUT) {
+            updated.delete(user)
+            changed = true
+          }
+        }
+        return changed ? updated : current
+      })
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     if (!username) {
@@ -69,7 +99,7 @@ function App() {
 
     mqttClient.on('connect', () => {
       setConnectionStatus('connected')
-      mqttClient.subscribe(CHAT_TOPIC, (err) => {
+      mqttClient.subscribe([CHAT_TOPIC, TYPING_TOPIC], (err) => {
         if (err) {
           console.error('Subscription error:', err)
         }
@@ -87,6 +117,23 @@ function App() {
           })
         } catch (error) {
           console.error('Failed to parse message:', error)
+        }
+      } else if (topic === TYPING_TOPIC) {
+        try {
+          const typingEvent: TypingEvent = JSON.parse(payload.toString())
+          if (typingEvent.username !== displayUsername) {
+            setTypingUsers((current) => {
+              const updated = new Map(current)
+              if (typingEvent.isTyping) {
+                updated.set(typingEvent.username, typingEvent.timestamp)
+              } else {
+                updated.delete(typingEvent.username)
+              }
+              return updated
+            })
+          }
+        } catch (error) {
+          console.error('Failed to parse typing event:', error)
         }
       }
     })
@@ -107,8 +154,45 @@ function App() {
     setClient(mqttClient)
   }
 
+  const emitTypingStatus = (isTyping: boolean) => {
+    if (!client || connectionStatus !== 'connected') return
+
+    const typingEvent: TypingEvent = {
+      username: displayUsername,
+      isTyping,
+      timestamp: Date.now(),
+    }
+
+    client.publish(TYPING_TOPIC, JSON.stringify(typingEvent), { qos: 0 })
+  }
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setInputMessage(e.target.value)
+
+    if (e.target.value.trim() && connectionStatus === 'connected') {
+      const now = Date.now()
+      if (now - lastTypingEmitRef.current > 1000) {
+        emitTypingStatus(true)
+        lastTypingEmitRef.current = now
+      }
+
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current)
+      }
+
+      typingTimeoutRef.current = setTimeout(() => {
+        emitTypingStatus(false)
+      }, TYPING_TIMEOUT)
+    }
+  }
+
   const handleSendMessage = () => {
     if (!inputMessage.trim() || !client || connectionStatus !== 'connected') return
+
+    emitTypingStatus(false)
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current)
+    }
 
     const message: Message = {
       id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
@@ -191,6 +275,14 @@ function App() {
     ]
     const index = username.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % colors.length
     return colors[index]
+  }
+
+  const getTypingText = () => {
+    const users = Array.from(typingUsers.keys())
+    if (users.length === 0) return null
+    if (users.length === 1) return `${users[0]} is typing...`
+    if (users.length === 2) return `${users[0]} and ${users[1]} are typing...`
+    return `${users[0]}, ${users[1]}, and ${users.length - 2} others are typing...`
   }
 
   return (
@@ -277,6 +369,33 @@ function App() {
                 <p className="font-mono text-sm">No messages yet. Start the conversation!</p>
               </div>
             )}
+            {typingUsers.size > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 5 }}
+                className="flex items-center gap-2 text-muted-foreground text-sm font-mono pl-11"
+              >
+                <div className="flex gap-1">
+                  <motion.span
+                    animate={{ opacity: [0.4, 1, 0.4] }}
+                    transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
+                    className="w-1.5 h-1.5 bg-accent rounded-full"
+                  />
+                  <motion.span
+                    animate={{ opacity: [0.4, 1, 0.4] }}
+                    transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut", delay: 0.2 }}
+                    className="w-1.5 h-1.5 bg-accent rounded-full"
+                  />
+                  <motion.span
+                    animate={{ opacity: [0.4, 1, 0.4] }}
+                    transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut", delay: 0.4 }}
+                    className="w-1.5 h-1.5 bg-accent rounded-full"
+                  />
+                </div>
+                <span className="text-accent">{getTypingText()}</span>
+              </motion.div>
+            )}
           </div>
         </ScrollArea>
 
@@ -285,7 +404,7 @@ function App() {
             <Input
               ref={inputRef}
               value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
+              onChange={handleInputChange}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()

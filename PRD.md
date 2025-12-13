@@ -47,6 +47,13 @@ This is a real-time messaging application with connection management, message hi
 - **Progression**: State changes → Indicator updates color/text → Display appropriate icon → Show error message if disconnected
 - **Success criteria**: Users can always see their connection status and understand what it means
 
+### Typing Indicators
+- **Functionality**: Display real-time indicators when other users are composing messages
+- **Purpose**: Create a more engaging, conversational experience by showing active participation
+- **Trigger**: User begins typing in the message input field
+- **Progression**: User types → Typing event published to MQTT → Other clients receive event → Animated indicator appears below messages → Indicator disappears after 3s of inactivity or when message is sent
+- **Success criteria**: Typing indicators appear within 100ms of typing start, display correct usernames, and automatically clear after timeout
+
 ## Edge Case Handling
 
 - **Connection Failures** - Display clear error message with reconnect button; queue messages locally until reconnected
@@ -56,6 +63,8 @@ This is a real-time messaging application with connection management, message hi
 - **Username Not Set** - Default to "Anonymous" + random ID if user hasn't set a username
 - **Network Instability** - Auto-reconnect with exponential backoff; show "Reconnecting..." status
 - **Rapid Message Sending** - No artificial rate limiting but show sending state feedback
+- **Multiple Typing Users** - Display up to 3 usernames, then "X others are typing..."
+- **Stale Typing Indicators** - Automatically clear typing status after 3 seconds of inactivity
 
 ## Design Direction
 
@@ -89,7 +98,7 @@ The typefaces should convey technical precision and modern digital communication
 
 ## Animations
 
-Animations should emphasize the real-time nature of the chat while maintaining subtlety - messages should slide in smoothly, connection status should pulse when active, and the send button should provide satisfying tactile feedback with a scale effect on press.
+Animations should emphasize the real-time nature of the chat while maintaining subtlety - messages should slide in smoothly, connection status should pulse when active, the send button should provide satisfying tactile feedback with a scale effect on press, and typing indicators should have a pulsing dot animation to convey active composition.
 
 ## Component Selection
 
@@ -106,12 +115,14 @@ Animations should emphasize the real-time nature of the chat while maintaining s
   - Custom message bubble component with timestamp and sender info
   - Animated connection indicator with pulse effect
   - Custom input with integrated send button
+  - Animated typing indicator with pulsing dots
   
 - **States**: 
   - Input: Focus state with cyan glow ring, disabled when disconnected
   - Send Button: Hover scale (1.05), active scale (0.95), disabled opacity (0.5)
   - Connection Badge: Green (connected), yellow (connecting), red (disconnected) with pulse animation
   - Messages: Subtle fade-in slide-up animation on arrival
+  - Typing Indicator: Pulsing dots with staggered animation delays, fade in/out on appearance/disappearance
   
 - **Icon Selection**: 
   - PaperPlaneRight (send message)
