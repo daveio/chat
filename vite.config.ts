@@ -14,8 +14,11 @@ export default defineConfig({
 		tailwindcss(),
 		// DO NOT REMOVE
 		createIconImportProxy() as PluginOption,
-		sparkPlugin() as PluginOption,
+		sparkPlugin({ port: 3000 }) as PluginOption,
 	],
+	server: {
+		host: true,
+	},
 	resolve: {
 		alias: {
 			"@": resolve(projectRoot, "src"),

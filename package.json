@@ -88,13 +88,13 @@
 	"scripts": {
 		"build": "tsc -b --noCheck && vite build",
 		"dev": "vite",
-		"kill": "fuser -k 5000/tcp",
+		"kill": "fuser -k 3000/tcp",
 		"lint": "eslint .",
 		"optimize": "vite optimize",
 		"preview": "vite preview"
 	},
 	"type": "module",
-	"version": "0.0.0",
+	"version": "0.0.1",
 	"workspaces": {
 		"packages": [
 			"packages/*"
