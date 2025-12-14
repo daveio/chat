@@ -1,0 +1,386 @@
+import mqtt from 'mqtt'
+import type { MqttClient } from 'mqtt'
+import type {
+  DeliveryReceipt,
+  EncryptedMessage,
+  Message,
+  PublicKeyAnnouncement,
+  PublicKeyRequest,
+  ReceiptStatus,
+  TypingEvent,
+} from '~/types'
+import {
+  decryptMessage,
+  importPublicKey,
+} from '~/utils/crypto'
+
+export function useMqtt() {
+  const store = useChatStore()
+  const client = ref<MqttClient | null>(null)
+  const lastTypingEmit = ref(0)
+  const typingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
+
+  // Connect to MQTT broker
+  async function connect() {
+    if (!store.myKeyPair || !store.myPublicKeyString) return
+
+    store.setConnectionStatus('connecting')
+
+    const clientId = `mqtt-chat-${Math.random().toString(16).substring(2, 10)}`
+    store.setClientId(clientId)
+
+    const mqttClient = mqtt.connect(
+      `${store.serverConfig.brokerUrl}:${store.serverConfig.port}`,
+      {
+        clientId,
+        clean: true,
+        reconnectPeriod: 5000,
+      },
+    )
+
+    mqttClient.on('connect', () => {
+      store.setConnectionStatus('connected')
+      mqttClient.subscribe(
+        [
+          store.topics.messages,
+          store.topics.typing,
+          store.topics.pubkeys,
+          store.topics.pubkeyRequest,
+          store.topics.receipts,
+        ],
+        (err) => {
+          if (err) {
+            console.error('Subscription error:', err)
+          } else {
+            announcePublicKey()
+            requestPublicKeys()
+          }
+        },
+      )
+    })
+
+    mqttClient.on('message', async (topic, payload) => {
+      await handleMessage(topic, payload)
+    })
+
+    mqttClient.on('error', (error) => {
+      console.error('MQTT Error:', error)
+      store.setConnectionStatus('error')
+    })
+
+    mqttClient.on('offline', () => {
+      store.setConnectionStatus('disconnected')
+    })
+
+    mqttClient.on('reconnect', () => {
+      store.setConnectionStatus('connecting')
+    })
+
+    client.value = mqttClient
+  }
+
+  // Handle incoming messages
+  async function handleMessage(topic: string, payload: Buffer) {
+    const { topics, displayUsername, myPublicKeyString, myKeyPair, peerPublicKeys } = store
+
+    if (topic === topics.messages) {
+      try {
+        const encryptedMsg: EncryptedMessage = JSON.parse(payload.toString())
+
+        if (encryptedMsg.username === displayUsername) {
+          return
+        }
+
+        // Update peer status
+        const hasKey = peerPublicKeys.has(encryptedMsg.senderPublicKey)
+        store.updatePeer({
+          username: encryptedMsg.username,
+          hasPublicKey: hasKey,
+          lastSeen: Date.now(),
+        })
+
+        // Import sender's public key if needed
+        let senderPublicKey = peerPublicKeys.get(encryptedMsg.senderPublicKey)?.key
+        if (!senderPublicKey) {
+          senderPublicKey = await importPublicKey(encryptedMsg.senderPublicKey)
+          store.setPeerPublicKey(encryptedMsg.senderPublicKey, senderPublicKey)
+          store.updatePeer({
+            username: encryptedMsg.username,
+            hasPublicKey: true,
+            lastSeen: Date.now(),
+          })
+        }
+
+        // Check if message is encrypted for us
+        const encryptedForMe = encryptedMsg.encrypted[myPublicKeyString]
+        if (!encryptedForMe) {
+          sendReceipt(encryptedMsg.id, 'received')
+          return
+        }
+
+        // Decrypt message
+        const decryptedText = await decryptMessage(
+          encryptedForMe,
+          myKeyPair!.privateKey,
+          senderPublicKey,
+        )
+
+        sendReceipt(encryptedMsg.id, 'decrypted')
+
+        const message: Message = {
+          id: encryptedMsg.id,
+          username: encryptedMsg.username,
+          text: decryptedText,
+          timestamp: encryptedMsg.timestamp,
+          receipts: new Map(),
+        }
+
+        store.addMessage(message)
+      } catch (error) {
+        console.error('Failed to decrypt message:', error)
+      }
+    } else if (topic === topics.typing) {
+      try {
+        const typingEvent: TypingEvent = JSON.parse(payload.toString())
+        if (typingEvent.username !== displayUsername) {
+          const hasKey = peerPublicKeys.has(typingEvent.publicKey)
+          store.updatePeer({
+            username: typingEvent.username,
+            hasPublicKey: hasKey,
+            lastSeen: Date.now(),
+          })
+
+          if (typingEvent.isTyping && !peerPublicKeys.has(typingEvent.publicKey)) {
+            const pubKey = await importPublicKey(typingEvent.publicKey)
+            store.setPeerPublicKey(typingEvent.publicKey, pubKey)
+            store.updatePeer({
+              username: typingEvent.username,
+              hasPublicKey: true,
+              lastSeen: Date.now(),
+            })
+          }
+
+          if (typingEvent.isTyping) {
+            store.setTypingUser(typingEvent.username, typingEvent.timestamp)
+          } else {
+            store.removeTypingUser(typingEvent.username)
+          }
+        }
+      } catch (error) {
+        console.error('Failed to parse typing event:', error)
+      }
+    } else if (topic === topics.pubkeys) {
+      try {
+        const announcement: PublicKeyAnnouncement = JSON.parse(payload.toString())
+        if (announcement.username !== displayUsername) {
+          if (!peerPublicKeys.has(announcement.publicKey)) {
+            const pubKey = await importPublicKey(announcement.publicKey)
+            store.setPeerPublicKey(announcement.publicKey, pubKey)
+          }
+          store.updatePeer({
+            username: announcement.username,
+            hasPublicKey: true,
+            lastSeen: Date.now(),
+          })
+        }
+      } catch (error) {
+        console.error('Failed to process public key announcement:', error)
+      }
+    } else if (topic === topics.pubkeyRequest) {
+      try {
+        const request: PublicKeyRequest = JSON.parse(payload.toString())
+        if (request.requesterId !== store.myClientId) {
+          announcePublicKey()
+        }
+      } catch (error) {
+        console.error('Failed to process public key request:', error)
+      }
+    } else if (topic === topics.receipts) {
+      try {
+        const receipt: DeliveryReceipt = JSON.parse(payload.toString())
+        if (receipt.username !== displayUsername) {
+          store.updateMessageReceipt(receipt.messageId, {
+            username: receipt.username,
+            status: receipt.status,
+            timestamp: receipt.timestamp,
+          })
+        }
+      } catch (error) {
+        console.error('Failed to process delivery receipt:', error)
+      }
+    }
+  }
+
+  // Announce public key
+  function announcePublicKey() {
+    if (!client.value || !store.myPublicKeyString) return
+
+    const announcement: PublicKeyAnnouncement = {
+      username: store.displayUsername,
+      publicKey: store.myPublicKeyString,
+      timestamp: Date.now(),
+    }
+
+    client.value.publish(store.topics.pubkeys, JSON.stringify(announcement), { qos: 0 })
+  }
+
+  // Request public keys from other clients
+  function requestPublicKeys() {
+    if (!client.value) return
+
+    const request: PublicKeyRequest = {
+      requesterId: store.myClientId,
+      timestamp: Date.now(),
+    }
+
+    client.value.publish(store.topics.pubkeyRequest, JSON.stringify(request), { qos: 0 })
+  }
+
+  // Send delivery receipt
+  function sendReceipt(messageId: string, status: ReceiptStatus) {
+    if (!client.value) return
+
+    const receipt: DeliveryReceipt = {
+      messageId,
+      username: store.displayUsername,
+      status,
+      timestamp: Date.now(),
+    }
+
+    client.value.publish(store.topics.receipts, JSON.stringify(receipt), { qos: 0 })
+  }
+
+  // Send message
+  async function sendMessage(text: string) {
+    if (
+      !text.trim()
+      || !client.value
+      || store.connectionStatus !== 'connected'
+      || !store.myKeyPair
+      || !store.myPublicKeyString
+    ) {
+      return
+    }
+
+    const { encryptMessage } = await import('~/utils/crypto')
+
+    // Stop typing indicator
+    emitTypingStatus(false)
+    if (typingTimeout.value) {
+      clearTimeout(typingTimeout.value)
+      typingTimeout.value = null
+    }
+
+    // Build recipient list
+    const recipientKeys = Array.from(store.peerPublicKeys.values()).map(p => p.key)
+    recipientKeys.push(store.myKeyPair.publicKey)
+
+    const encrypted = await encryptMessage(
+      text.trim(),
+      store.myKeyPair.privateKey,
+      recipientKeys,
+    )
+
+    const encryptedByPublicKey: { [key: string]: string } = {}
+    Array.from(store.peerPublicKeys.values()).forEach((peer, idx) => {
+      encryptedByPublicKey[peer.serialized] = encrypted[idx]
+    })
+    encryptedByPublicKey[store.myPublicKeyString] = encrypted[recipientKeys.length - 1]
+
+    const encryptedMsg: EncryptedMessage = {
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      username: store.displayUsername,
+      encrypted: encryptedByPublicKey,
+      timestamp: Date.now(),
+      senderPublicKey: store.myPublicKeyString,
+    }
+
+    client.value.publish(
+      store.topics.messages,
+      JSON.stringify(encryptedMsg),
+      { qos: 0 },
+      (err) => {
+        if (err) {
+          console.error('Publish error:', err)
+        }
+      },
+    )
+
+    // Add message to local state
+    const message: Message = {
+      id: encryptedMsg.id,
+      username: store.displayUsername,
+      text: text.trim(),
+      timestamp: encryptedMsg.timestamp,
+      receipts: new Map(),
+    }
+    store.addMessage(message)
+  }
+
+  // Emit typing status
+  function emitTypingStatus(isTyping: boolean) {
+    if (!client.value || store.connectionStatus !== 'connected' || !store.myPublicKeyString) {
+      return
+    }
+
+    const typingEvent: TypingEvent = {
+      username: store.displayUsername,
+      isTyping,
+      timestamp: Date.now(),
+      publicKey: store.myPublicKeyString,
+    }
+
+    client.value.publish(store.topics.typing, JSON.stringify(typingEvent), { qos: 0 })
+  }
+
+  // Handle input change (for typing indicator)
+  function handleTyping(hasContent: boolean) {
+    if (hasContent && store.connectionStatus === 'connected') {
+      const now = Date.now()
+      if (now - lastTypingEmit.value > 1000) {
+        emitTypingStatus(true)
+        lastTypingEmit.value = now
+      }
+
+      if (typingTimeout.value) {
+        clearTimeout(typingTimeout.value)
+      }
+
+      typingTimeout.value = setTimeout(() => {
+        emitTypingStatus(false)
+      }, 3000)
+    }
+  }
+
+  // Disconnect
+  function disconnect() {
+    if (client.value) {
+      client.value.end(true)
+      client.value = null
+    }
+  }
+
+  // Reconnect
+  function reconnect() {
+    disconnect()
+    store.resetForReconnection()
+    connect()
+  }
+
+  // Handle server config change
+  function handleServerConfigChange() {
+    disconnect()
+    store.resetForReconnection()
+  }
+
+  return {
+    client,
+    connect,
+    disconnect,
+    reconnect,
+    sendMessage,
+    handleTyping,
+    requestPublicKeys,
+    handleServerConfigChange,
+  }
+}
