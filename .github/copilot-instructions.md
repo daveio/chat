@@ -1,12 +1,12 @@
 # Chat Codebase Guide
 
-> **Note**: This file is used by the automated Claude Code Review workflow (`.github/workflows/claude-code-review.yml`) 
+> **Note**: This file is also used by the automated Claude Code Review workflow (`.github/workflows/claude-code-review.yml`)
 > to provide context about project conventions, architecture, and coding standards when reviewing pull requests.
 > Keep this file updated with important architectural decisions, coding patterns, and contribution guidelines.
 
 ## PRD
 
-There is a Product Requirements Document in [PRD.md](/PRD.md). It should be read alongside this documentation.
+There is a Product Requirements Document in `PRD.md` in the root of the repository. It should be read alongside this documentation.
 
 ## TL;DR
 
