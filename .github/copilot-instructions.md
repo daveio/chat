@@ -1,5 +1,9 @@
 # Chat Codebase Guide
 
+## PRD
+
+There is a Product Requirements Document in [PRD.md](/PRD.md). It should be read alongside this documentation.
+
 ## TL;DR
 
 - React + Vite + SWC + Tailwind (shadcn preset) + GitHub Spark plugin.
