@@ -1,0 +1,36 @@
+name: claude-code-review
+on:
+  pull_request:
+    types: [opened, synchronize]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        id: checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - name: review
+        id: review
+        uses: anthropics/claude-code-action@b58533dbe0e6ea1a9c3b0f1d80fbee44985d2efd
+        with:
+          claude_args: --allowed-tools "Bash(gh:*)"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Please review this pull request and provide feedback on:
+            - Code quality and best practices
+            - Potential bugs or issues
+            - Performance considerations
+            - Security concerns
+            - Test coverage
+
+            Use the repository's `.github/copilot-instructions.md` for guidance on style and conventions. Be constructive and helpful in your feedback.
+
+            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
