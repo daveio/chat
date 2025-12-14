@@ -1,6 +1,7 @@
 # MQTT Chat Room - Feature Implementation TODO
 
 ## Task 1: Custom MQTT Server Configuration
+
 - [x] Add UI controls to configure MQTT broker settings
   - [x] Broker URL/host input field
   - [x] Port input field
@@ -13,6 +14,7 @@
 - [x] Add connect/disconnect controls for custom servers
 
 ## Task 2: Peer List with Public Key Status
+
 - [x] Track all known peers (from any MQTT activity)
 - [x] Visual indicator component for peer list
   - [x] Show nicknames of all peers
@@ -23,12 +25,14 @@
 - [x] Update peer tracking when public keys received
 
 ## Task 3: Manual Public Key Request
+
 - [x] Add button to manually request public keys
 - [x] Implement request handler (already exists, enhanced)
 - [x] Add visual feedback when request is sent
 - [x] Track when last request was made
 
 ## Task 4: Message Delivery Receipts
+
 - [x] Define receipt message structure
   - [x] Message ID reference
   - [x] Recipient username
@@ -44,6 +48,7 @@
 - [x] Update message UI to display receipt status
 
 ## Future: Shared Key Layer (Not Implemented Yet)
+
 - [ ] Design shared key cryptography layer
 - [ ] UI for key exchange/setup
 - [ ] Integration with existing E2EE

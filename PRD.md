@@ -2,7 +2,8 @@
 
 A real-time chat room application that enables users to communicate through MQTT protocol using a public broker, creating an instant messaging experience with persistent connections and topic-based message routing.
 
-**Experience Qualities**: 
+**Experience Qualities**:
+
 1. **Immediate** - Messages appear instantly across all connected clients with zero perceived delay
 2. **Conversational** - The interface feels like a natural chat experience with clear message attribution and timestamps
 3. **Reliable** - Connection status is always visible, and users understand when they're connected or disconnected
@@ -13,6 +14,7 @@ This is a real-time messaging application with connection management, message hi
 ## Essential Features
 
 ### Encryption Key Generation
+
 - **Functionality**: Generate ECDH P-256 keypair on app initialization for end-to-end encryption
 - **Purpose**: Enable secure, authenticated message encryption between all chat participants
 - **Trigger**: Automatic on app load before MQTT connection
@@ -20,6 +22,7 @@ This is a real-time messaging application with connection management, message hi
 - **Success criteria**: Keypair generated within 500ms, public key ready for distribution, UI shows "E2EE" badge
 
 ### Public Key Exchange
+
 - **Functionality**: Announce and collect public keys from all chat participants
 - **Purpose**: Enable message encryption to multiple recipients without exposing private keys
 - **Trigger**: On MQTT connection and when new typing events are received
@@ -27,6 +30,7 @@ This is a real-time messaging application with connection management, message hi
 - **Success criteria**: All active participants' public keys are collected and stored for encryption
 
 ### MQTT Connection Management
+
 - **Functionality**: Establish and maintain WebSocket connection to test.mosquitto.org:8081
 - **Purpose**: Enable real-time bidirectional communication between all chat participants
 - **Trigger**: Automatic connection after keypair generation with manual reconnect option
@@ -34,6 +38,7 @@ This is a real-time messaging application with connection management, message hi
 - **Success criteria**: Connection indicator shows "Connected" and user can send/receive encrypted messages; disconnection shows clear error state
 
 ### Encrypted Message Publishing
+
 - **Functionality**: Encrypt and send messages to all known participants using AES-GCM AEAD
 - **Purpose**: Ensure only intended recipients can read messages, with tamper protection
 - **Trigger**: User types message and presses Enter or clicks Send button
@@ -41,6 +46,7 @@ This is a real-time messaging application with connection management, message hi
 - **Success criteria**: Message encrypted for all peers, appears in local chat within 100ms, encrypted data published to MQTT, other clients can decrypt
 
 ### Encrypted Message Reception & Decryption
+
 - **Functionality**: Receive and decrypt messages using ECDH shared key derivation and AES-GCM
 - **Purpose**: Display decrypted conversation history from authenticated senders
 - **Trigger**: Encrypted messages arrive via MQTT subscription
@@ -48,6 +54,7 @@ This is a real-time messaging application with connection management, message hi
 - **Success criteria**: All messages decrypted successfully, appear in chronological order with sender identification, failed decryption handled gracefully
 
 ### Username Customization
+
 - **Functionality**: Allow users to set a display name for their messages
 - **Purpose**: Personalize the chat experience and identify message senders
 - **Trigger**: User clicks username field or icon to edit
@@ -55,6 +62,7 @@ This is a real-time messaging application with connection management, message hi
 - **Success criteria**: Username persists across sessions and appears on all sent messages
 
 ### Connection Status Indicator
+
 - **Functionality**: Real-time visual feedback on MQTT connection health
 - **Purpose**: Build trust by showing users they're connected and can communicate
 - **Trigger**: Connection state changes (connecting, connected, disconnected, error)
@@ -62,6 +70,7 @@ This is a real-time messaging application with connection management, message hi
 - **Success criteria**: Users can always see their connection status and understand what it means
 
 ### Typing Indicators
+
 - **Functionality**: Display real-time indicators when other users are composing messages, includes public key for new participants
 - **Purpose**: Create a more engaging, conversational experience by showing active participation
 - **Trigger**: User begins typing in the message input field
@@ -93,11 +102,11 @@ The design should evoke feelings of speed, modernity, security, and digital comm
 A vibrant, high-contrast palette inspired by terminal interfaces and neon signage, creating an energetic and modern chat experience.
 
 - **Primary Color**: `oklch(0.55 0.22 285)` - Deep electric purple that communicates technology and real-time communication
-- **Secondary Colors**: 
+- **Secondary Colors**:
   - Background: `oklch(0.12 0.015 285)` - Dark purple-tinted background for depth
   - Surface: `oklch(0.18 0.02 285)` - Slightly lighter surface for cards and message bubbles
 - **Accent Color**: `oklch(0.75 0.19 155)` - Bright cyan for active states, send button, and connection indicators
-- **Foreground/Background Pairings**: 
+- **Foreground/Background Pairings**:
   - Primary purple on dark background (oklch(0.55 0.22 285) on oklch(0.12 0.015 285)): Ratio 5.2:1 ✓
   - Cyan accent on dark background (oklch(0.75 0.19 155) on oklch(0.12 0.015 285)): Ratio 8.5:1 ✓
   - White text on surface (oklch(0.95 0.01 285) on oklch(0.18 0.02 285)): Ratio 12.1:1 ✓
@@ -107,7 +116,7 @@ A vibrant, high-contrast palette inspired by terminal interfaces and neon signag
 
 The typefaces should convey technical precision and modern digital communication, balancing readability with character.
 
-- **Typographic Hierarchy**: 
+- **Typographic Hierarchy**:
   - H1 (App Title): JetBrains Mono Bold / 24px / tight letter spacing (-0.02em)
   - Message Sender: JetBrains Mono Medium / 14px / normal spacing
   - Message Body: Inter Regular / 15px / relaxed line-height (1.6)
@@ -120,7 +129,7 @@ Animations should emphasize the real-time nature of the chat while maintaining s
 
 ## Component Selection
 
-- **Components**: 
+- **Components**:
   - Card (message container and chat window)
   - Input (message composition with custom styling)
   - Button (send message, reconnect with accent color)
@@ -128,34 +137,29 @@ Animations should emphasize the real-time nature of the chat while maintaining s
   - ScrollArea (message feed with auto-scroll)
   - Avatar (user identification with generated colors)
   - Separator (visual breaks between UI sections)
-  
-- **Customizations**: 
+- **Customizations**:
   - Custom message bubble component with timestamp and sender info
   - Animated connection indicator with pulse effect
   - Custom input with integrated send button
   - Animated typing indicator with pulsing dots
-  
-- **States**: 
+- **States**:
   - Input: Focus state with cyan glow ring, disabled when disconnected
   - Send Button: Hover scale (1.05), active scale (0.95), disabled opacity (0.5)
   - Connection Badge: Green (connected), yellow (connecting), red (disconnected) with pulse animation
   - Messages: Subtle fade-in slide-up animation on arrival
   - Typing Indicator: Pulsing dots with staggered animation delays, fade in/out on appearance/disappearance
-  
-- **Icon Selection**: 
+- **Icon Selection**:
   - PaperPlaneRight (send message)
   - WifiHigh/WifiSlash (connection status)
   - UserCircle (username/profile)
   - ArrowClockwise (reconnect)
   - LockKey (encryption status and key generation)
-  
-- **Spacing**: 
+- **Spacing**:
   - Container padding: p-6
   - Message gaps: gap-3
   - Input group gap: gap-2
   - Section margins: mb-4
-  
-- **Mobile**: 
+- **Mobile**:
   - Single column layout maintained
   - Larger touch targets for send button (min-h-12)
   - Fixed input at bottom with sticky positioning
