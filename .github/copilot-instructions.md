@@ -471,60 +471,73 @@ type DeliveryReceipt = {
 
 - Browser app connects to an MQTT broker via WebSockets.
 - Messages are published and received using MQTT topics.
-- End-to-end encryption is performed entirely in the browser.
-- A small amount of config is persisted via GitHub Spark KV.
+- End-to-end encryption is performed entirely in the browser using WebCrypto.
+- Configuration is persisted via Pinia store + browser localStorage.
 
 ### Data Flow and Lifecycle
 
 1. **Startup**
-   - Generate ECDH P-256 keypair.
+   - Load persisted config from localStorage via Pinia store.
+   - Generate ECDH P-256 keypair using WebCrypto.
    - Export public key (SPKI → base64).
    - Connect to broker and subscribe to all relevant topics.
+   - Start typing expiry checker interval.
 
 2. **Key discovery / peer awareness**
    - Publish your public key announcement.
    - Publish a "pubkey-request" so others will re-announce.
    - Track peers when receiving typing events / messages / pubkey announcements.
+   - Import and cache peer public keys with race condition prevention.
 
 3. **Sending a message**
    - Build recipient list from known peer public keys + self key.
    - For each recipient, derive a shared AES-GCM key via ECDH and encrypt with a fresh random IV.
    - Publish a single MQTT message containing a map from recipient public key string → ciphertext.
-   - Optimistically add plaintext to local UI.
+   - Optimistically add plaintext to local Pinia store.
+   - Clear typing indicator.
 
 4. **Receiving a message**
+   - Validate incoming payload with Zod schema.
    - Ignore if `encryptedMsg.username === displayUsername` (self).
    - Ensure sender public key is imported and stored.
    - If message does not include `encrypted[myPublicKeyString]`, treat as "not for me" and send a receipt.
-   - Otherwise decrypt using derived shared key and update messages.
+   - Otherwise decrypt using derived shared key and update messages in Pinia store.
 
 5. **Receipts**
    - Recipients publish to `<prefix>/receipts` with status `received` or `decrypted`.
    - Senders attach receipts to their own messages for UI display.
+   - Receipt status only upgrades (never downgrades): sent → received → decrypted.
 
 ### Key Design Patterns
 
 - **Pub/Sub + event handlers**: MQTT topics replace typical HTTP endpoints.
-- **Local-first UI state**: React state holds message list and maps.
-- **KV persistence**: Spark KV stores user config / identity.
+- **Composition API**: Vue 3 composables (`useChat`, `useMqtt`) encapsulate reusable logic.
+- **Centralized state**: Pinia store manages all application state with localStorage persistence.
+- **Schema validation**: Zod validates all incoming MQTT payloads before processing.
+- **Separation of concerns**: Crypto, constants, schemas, and types are in dedicated `utils/` and `types/` directories.
 
-### Module Dependencies (Not Exhaustive)
+### Module Dependencies
 
-- `App.tsx` depends on:
-  - `mqtt` for broker connection
-  - `lib/crypto.ts` for E2EE
+- `pages/index.vue` depends on:
+  - `composables/useChat.ts` for orchestration and helpers
+  - `composables/useMqtt.ts` for MQTT operations
   - UI components under `components/` and `components/ui/`
-  - Spark KV hooks for persistence
+- `composables/useMqtt.ts` depends on:
+  - `mqtt` package for broker connection
+  - `utils/crypto.ts` for E2EE
+  - `utils/schemas.ts` for payload validation
+  - `stores/chat.ts` for state management
+- `stores/chat.ts` depends on:
+  - `utils/constants.ts` for configuration values
+  - Browser localStorage for persistence
 
 ## 6. Environment & Setup Analysis
 
 ### Environment Variables
 
 - None are required to run locally by default.
-- Vite config reads `process.env.PROJECT_ROOT` (optional) to compute alias root.
-- `src/vite-end.d.ts` declares Spark-provided runtime globals:
-  - `GITHUB_RUNTIME_PERMANENT_NAME`
-  - `BASE_KV_SERVICE_URL`
+- Nuxt handles environment configuration automatically.
+- SSR is disabled (`ssr: false` in `nuxt.config.ts`) since MQTT requires browser APIs.
 
 ### Install and Run
 
@@ -540,35 +553,48 @@ bun run build
 bun run preview
 ```
 
+Generate static site:
+
+```bash
+bun run generate
+```
+
 ### Development Workflow
 
-- Edit React/TS in `src/`, Vite handles HMR.
-- Tailwind v4 is configured via `@tailwindcss/vite` and CSS `@config` in `src/main.css`.
+- Edit Vue/TS files in `pages/`, `components/`, `composables/`, `stores/`.
+- Nuxt provides HMR (Hot Module Replacement) via Vite.
+- TypeScript type checking: `bun run typecheck`.
+- Linting: `bun run lint` (uses Trunk).
+- Formatting: `bun run format` (uses Prettier + Trunk).
+- Tailwind CSS v4 is configured via `@nuxtjs/tailwindcss` module.
 
 ### Production Deployment Strategy
 
-- Vite produces static assets (`vite build`).
-- The Spark plugins suggest this is intended to run within GitHub Spark hosting/runtime (KV-backed), but it can also be served as a static SPA if Spark-specific runtime requirements are satisfied.
+- Nuxt builds static assets via `nuxi build` or generates a static site via `nuxi generate`.
+- The output can be deployed to any static hosting provider (Vercel, Netlify, Cloudflare Pages, etc.).
+- Since SSR is disabled, the app runs entirely in the browser as a client-side SPA.
 
 ## 7. Technology Stack Breakdown
 
 - **Runtime environment**: Browser (WebSockets + WebCrypto)
 - **Frameworks/libraries**:
-  - React 19
-  - `mqtt` (MQTT client)
-  - `@github/spark` (runtime + KV hooks)
-  - Radix UI + shadcn/ui
+  - Nuxt 3.15+ (with Nuxt 4 compatibility mode)
+  - Vue 3.5+ (Composition API)
+  - Pinia 2.3+ (state management)
+  - `mqtt` 5.14+ (MQTT client)
+  - Zod 3.24+ (runtime schema validation)
+  - VueUse 12+ (composable utilities)
   - Tailwind CSS v4 + `tailwind-merge` + `clsx`
-  - framer-motion
-  - zod (present; not obviously used in files reviewed)
+  - `class-variance-authority` (component variants)
+  - `tw-animate-css` (animations)
 - **Build tools**:
-  - Vite 7
-  - SWC React plugin
-  - Tailwind Vite plugin
+  - Nuxt (built on Vite)
+  - TypeScript 5.9+
+  - Bun 1.3+ (package manager)
 - **Testing**:
   - None configured in this snapshot.
 - **Deployment**:
-  - Static build output (Vite) + (optionally) GitHub Spark runtime services.
+  - Static build output (Nuxt generate) or SSR-disabled SPA build.
 
 ## 8. Visual Architecture Diagrams
 
@@ -582,8 +608,9 @@ id: e423e91c-58d1-4d5e-9bf1-812d33e9d598
 ---
 flowchart LR
  subgraph Browser["User Browser"]
-        UI["React UI"]
-        KV["useKV - Spark KV"]
+        UI["Vue 3 UI (Nuxt)"]
+        Store["Pinia Store"]
+        LS["localStorage"]
         Crypto["WebCrypto - ECDH P-256 + AES-GCM"]
         MQTTClient["mqtt client via WebSocket transport"]
   end
@@ -595,12 +622,13 @@ flowchart LR
         T5["/receipts"]
   end
  subgraph OtherBrowsers["Other Participants"]
-        PeerUI["React UI"]
+        PeerUI["Vue 3 UI"]
         PeerCrypto["WebCrypto"]
         PeerMQTT["mqtt client"]
   end
     UI --> Crypto & MQTTClient
-    UI <--> KV
+    UI <--> Store
+    Store <--> LS
     MQTTClient <--> T1 & T2 & T3 & T4 & T5
     PeerUI --> PeerCrypto & PeerMQTT
     PeerMQTT <--> T1 & T2 & T3 & T4 & T5
@@ -615,39 +643,54 @@ config:
 id: 4a380003-cbb8-474c-bcad-7a7ae057a314
 ---
 flowchart TB
- subgraph Source_Code["src/ (Source Code)"]
-        entry["main.tsx"]
-        app["App.tsx"]
+ subgraph Nuxt_App["Nuxt Application"]
+        appvue["app.vue"]
+        pages["pages/"]
+        layouts["layouts/"]
         comps["components/"]
         ui["components/ui/"]
-        lib["lib/"]
-        styles["styles/"]
-        hooks["hooks/"]
+        composables["composables/"]
+        stores["stores/"]
   end
- subgraph Config["Project Config & Meta"]
-        cfg["configs"]
+ subgraph Utils_Types["Utils & Types"]
+        utils["utils/"]
+        types["types/"]
+  end
+ subgraph Config["Project Config"]
+        nuxtconfig["nuxt.config.ts"]
+        tailwind["tailwind.config.js"]
         dotgithub[".github/"]
         trunk[".trunk/"]
   end
- subgraph Components["components/ (UI)"]
-        peer["PeerList.tsx"]
-        receipts["MessageReceipts.tsx"]
-        server["ServerSettings.tsx"]
+ subgraph Pages["pages/"]
+        index["index.vue"]
   end
- subgraph Libraries_Hooks["lib/ & hooks/ (Logic/Utilities)"]
+ subgraph Components["components/"]
+        peer["PeerList.vue"]
+        receipts["MessageReceipts.vue"]
+        server["ServerSettings.vue"]
+  end
+ subgraph Composables["composables/"]
+        useChat["useChat.ts"]
+        useMqtt["useMqtt.ts"]
+  end
+ subgraph Stores["stores/"]
+        chatStore["chat.ts"]
+  end
+ subgraph Utilities["utils/"]
         crypto["crypto.ts"]
-        utils["utils.ts"]
-        mobile["use-mobile.ts"]
+        schemas["schemas.ts"]
+        constants["constants.ts"]
+        cn["cn.ts"]
   end
- subgraph Styles["styles/"]
-        theme["theme.css"]
-  end
-    Root["repo root"] --> Source_Code & Config
-    Source_Code --> entry & app & comps & ui & lib & styles & hooks
-    comps --> peer & receipts & server
-    lib --> crypto & utils
-    hooks --> mobile
-    styles --> theme
+    Root["repo root"] --> Nuxt_App & Utils_Types & Config
+    Nuxt_App --> appvue & pages & layouts & comps & composables & stores
+    pages --> index
+    comps --> peer & receipts & server & ui
+    composables --> useChat & useMqtt
+    stores --> chatStore
+    Utils_Types --> utils & types
+    utils --> crypto & schemas & constants & cn
 ```
 
 ## 9. Key Insights & Recommendations
@@ -656,11 +699,15 @@ flowchart TB
 
 - **Strengths**:
   - Clear topic separation (`messages`, `typing`, `pubkeys`, `receipts`).
+  - Well-structured separation of concerns: composables, stores, utils, types.
   - Reasonable UI/UX: status badges, settings dialog, receipts tooltip, peer list.
   - Uses WebCrypto correctly at a high level (ECDH-derived AES-GCM + random IV per encryption).
+  - Zod schema validation on all incoming MQTT messages.
+  - Centralized constants prevent magic numbers.
+  - Memory leak prevention with proper cleanup of timers.
 - **Gaps**:
-  - Large `App.tsx` (transport + crypto + state + UI all in one file).
   - No automated tests.
+  - No message signing for sender verification.
 
 ### Security Considerations (High Priority)
 
@@ -677,22 +724,24 @@ flowchart TB
 
 - **Encryption cost scales with peer count**: one encryption per recipient per message.
   - Recommendation: for larger rooms, consider group encryption strategies (e.g., shared room key exchanged via ECDH) or hybrid approaches.
-- **State updates in maps**: frequent `new Map()` and map mutations can be OK, but watch for unnecessary re-renders.
+- **Map reactivity**: Pinia store uses `shallowReactive` Maps which is appropriate, but ensure proper Vue reactivity patterns.
+- **Key import deduplication**: The `pendingKeyImports` Set prevents duplicate concurrent imports.
 
 ### Maintainability Suggestions
 
-- **Refactor `App.tsx` into modules**:
-  - `mqttClient.ts` (connect/subscribe/publish helpers)
-  - `protocol.ts` (topic names + Zod schemas)
-  - `chatState.ts` (reducers for messages/peers/typing)
-  - `crypto.ts` already exists; could expand to include signature/key-rotation helpers
-- **Add schema validation**:
-  - Zod is already installed; validate incoming MQTT payloads to avoid runtime crashes and weird state.
 - **Add tests**:
-  - Unit tests for crypto helpers and protocol parsing.
-  - Lightweight component tests for receipt/peer rendering.
+  - Unit tests for crypto helpers (`utils/crypto.ts`).
+  - Unit tests for Zod schema validation (`utils/schemas.ts`).
+  - Component tests for Vue components (consider Vitest + Vue Test Utils).
+- **Consider additional composables**:
+  - Extract peer management logic if it grows more complex.
+  - Add a `useCrypto` composable for crypto operations if needed.
+- **Expand crypto module**:
+  - Add signature/key-rotation helpers when implementing message signing.
 
 ### Deployment / Ops Notes
 
-- Default broker is a public test broker; expect instability and no guarantees.
+- Default broker is a public test broker (`test.mosquitto.org`); expect instability and no guarantees.
   - Recommendation: provide guidance for running a private broker and enabling auth/TLS.
+- The app is fully client-side (SSR disabled); can be deployed to any static hosting.
+- Consider adding PWA support via `@vite-pwa/nuxt` for offline capability.
