@@ -13,6 +13,17 @@ import {
   decryptMessage,
   importPublicKey,
 } from '~/utils/crypto'
+import {
+  TYPING_THROTTLE_MS,
+  TYPING_TIMEOUT_MS,
+} from '~/utils/constants'
+import {
+  DeliveryReceiptSchema,
+  EncryptedMessageSchema,
+  PublicKeyAnnouncementSchema,
+  PublicKeyRequestSchema,
+  TypingEventSchema,
+} from '~/utils/schemas'
 
 export function useMqtt() {
   const store = useChatStore()
@@ -50,7 +61,9 @@ export function useMqtt() {
         ],
         (err) => {
           if (err) {
-            console.error('Subscription error:', err)
+            if (import.meta.dev) {
+              console.error('Subscription error:', err)
+            }
           } else {
             announcePublicKey()
             requestPublicKeys()
@@ -64,7 +77,9 @@ export function useMqtt() {
     })
 
     mqttClient.on('error', (error) => {
-      console.error('MQTT Error:', error)
+      if (import.meta.dev) {
+        console.error('MQTT Error:', error)
+      }
       store.setConnectionStatus('error')
     })
 
@@ -85,7 +100,14 @@ export function useMqtt() {
 
     if (topic === topics.messages) {
       try {
-        const encryptedMsg: EncryptedMessage = JSON.parse(payload.toString())
+        const parsed = EncryptedMessageSchema.safeParse(JSON.parse(payload.toString()))
+        if (!parsed.success) {
+          if (import.meta.dev) {
+            console.error('Invalid encrypted message schema:', parsed.error)
+          }
+          return
+        }
+        const encryptedMsg: EncryptedMessage = parsed.data
 
         if (encryptedMsg.username === displayUsername) {
           return
@@ -137,11 +159,20 @@ export function useMqtt() {
 
         store.addMessage(message)
       } catch (error) {
-        console.error('Failed to decrypt message:', error)
+        if (import.meta.dev) {
+          console.error('Failed to decrypt message:', error)
+        }
       }
     } else if (topic === topics.typing) {
       try {
-        const typingEvent: TypingEvent = JSON.parse(payload.toString())
+        const parsed = TypingEventSchema.safeParse(JSON.parse(payload.toString()))
+        if (!parsed.success) {
+          if (import.meta.dev) {
+            console.error('Invalid typing event schema:', parsed.error)
+          }
+          return
+        }
+        const typingEvent: TypingEvent = parsed.data
         if (typingEvent.username !== displayUsername) {
           const hasKey = peerPublicKeys.has(typingEvent.publicKey)
           store.updatePeer({
@@ -167,11 +198,20 @@ export function useMqtt() {
           }
         }
       } catch (error) {
-        console.error('Failed to parse typing event:', error)
+        if (import.meta.dev) {
+          console.error('Failed to parse typing event:', error)
+        }
       }
     } else if (topic === topics.pubkeys) {
       try {
-        const announcement: PublicKeyAnnouncement = JSON.parse(payload.toString())
+        const parsed = PublicKeyAnnouncementSchema.safeParse(JSON.parse(payload.toString()))
+        if (!parsed.success) {
+          if (import.meta.dev) {
+            console.error('Invalid public key announcement schema:', parsed.error)
+          }
+          return
+        }
+        const announcement: PublicKeyAnnouncement = parsed.data
         if (announcement.username !== displayUsername) {
           if (!peerPublicKeys.has(announcement.publicKey)) {
             const pubKey = await importPublicKey(announcement.publicKey)
@@ -184,20 +224,38 @@ export function useMqtt() {
           })
         }
       } catch (error) {
-        console.error('Failed to process public key announcement:', error)
+        if (import.meta.dev) {
+          console.error('Failed to process public key announcement:', error)
+        }
       }
     } else if (topic === topics.pubkeyRequest) {
       try {
-        const request: PublicKeyRequest = JSON.parse(payload.toString())
+        const parsed = PublicKeyRequestSchema.safeParse(JSON.parse(payload.toString()))
+        if (!parsed.success) {
+          if (import.meta.dev) {
+            console.error('Invalid public key request schema:', parsed.error)
+          }
+          return
+        }
+        const request: PublicKeyRequest = parsed.data
         if (request.requesterId !== store.myClientId) {
           announcePublicKey()
         }
       } catch (error) {
-        console.error('Failed to process public key request:', error)
+        if (import.meta.dev) {
+          console.error('Failed to process public key request:', error)
+        }
       }
     } else if (topic === topics.receipts) {
       try {
-        const receipt: DeliveryReceipt = JSON.parse(payload.toString())
+        const parsed = DeliveryReceiptSchema.safeParse(JSON.parse(payload.toString()))
+        if (!parsed.success) {
+          if (import.meta.dev) {
+            console.error('Invalid delivery receipt schema:', parsed.error)
+          }
+          return
+        }
+        const receipt: DeliveryReceipt = parsed.data
         if (receipt.username !== displayUsername) {
           store.updateMessageReceipt(receipt.messageId, {
             username: receipt.username,
@@ -206,7 +264,9 @@ export function useMqtt() {
           })
         }
       } catch (error) {
-        console.error('Failed to process delivery receipt:', error)
+        if (import.meta.dev) {
+          console.error('Failed to process delivery receipt:', error)
+        }
       }
     }
   }
@@ -300,7 +360,7 @@ export function useMqtt() {
       JSON.stringify(encryptedMsg),
       { qos: 0 },
       (err) => {
-        if (err) {
+        if (err && import.meta.dev) {
           console.error('Publish error:', err)
         }
       },
@@ -337,7 +397,7 @@ export function useMqtt() {
   function handleTyping(hasContent: boolean) {
     if (hasContent && store.connectionStatus === 'connected') {
       const now = Date.now()
-      if (now - lastTypingEmit.value > 1000) {
+      if (now - lastTypingEmit.value > TYPING_THROTTLE_MS) {
         emitTypingStatus(true)
         lastTypingEmit.value = now
       }
@@ -348,12 +408,18 @@ export function useMqtt() {
 
       typingTimeout.value = setTimeout(() => {
         emitTypingStatus(false)
-      }, 3000)
+      }, TYPING_TIMEOUT_MS)
     }
   }
 
   // Disconnect
   function disconnect() {
+    // Clear typing timeout to prevent memory leak
+    if (typingTimeout.value) {
+      clearTimeout(typingTimeout.value)
+      typingTimeout.value = null
+    }
+
     if (client.value) {
       client.value.end(true)
       client.value = null

@@ -10,59 +10,108 @@ There is a Product Requirements Document in `PRD.md` in the root of the reposito
 
 ## TL;DR
 
-- React + Vite + SWC + Tailwind (shadcn preset) + GitHub Spark plugin.
+- Nuxt 4 + Vue 3 + Pinia + Tailwind CSS v4.
 - Stateful MQTT chat with end-to-end encryption (ECDH P-256 + AES-GCM) and per-peer delivery receipts.
-- Persisted client settings via Spark `useKV` (username and broker config).
+- Persisted client settings via Pinia + localStorage (username and broker config).
+- Zod schema validation for all MQTT messages.
 
 ## How It's Wired
 
-- Entry: `src/main.tsx` mounts `<App />` inside `react-error-boundary` (dev rethrows to surface errors).
-- Vite config: `vite.config.ts` adds Spark plugin, Tailwind plugin, and Phosphor icon proxy; alias `@` → `src`.
-- Styling: Tailwind config merges `theme.json` if present; uses CSS variables for color/spacing; main styles in `src/main.css`, `src/styles/theme.css`, `src/index.css`.
-- UI kit: shadcn components in `src/components/ui/*`; `lib/utils.ts` exports `cn` helper.
+- Entry: `app.vue` serves as Nuxt app root with default layout.
+- Main page: `pages/index.vue` implements the chat UI using Vue Composition API.
+- Nuxt config: `nuxt.config.ts` configures Tailwind, Pinia, VueUse modules; SSR disabled (client-only).
+- Styling: Tailwind CSS v4 with custom configuration; main styles in `assets/css/main.css`.
+- UI kit: Custom Vue components in `components/ui/*`; `utils/cn.ts` exports `cn` helper.
+- State management: Pinia store in `stores/chat.ts` with localStorage persistence.
+- Composables: Vue composables in `composables/` for MQTT and chat orchestration.
+- Types: TypeScript definitions in `types/index.ts`.
+- Validation: Zod schemas in `utils/schemas.ts` validate all MQTT messages.
 
-### Core Runtime (`src/App.tsx`)
+### Core Runtime
 
-- State: MQTT config (`useKV`), username (`useKV`), keypair, peers map (username → {hasPublicKey,lastSeen}), peer public keys map, message list, typing users, connection status, MQTT client.
-- MQTT topics derived from `topicPrefix`: `messages`, `typing`, `pubkeys`, `pubkey-request`, `receipts`.
+#### State Management (`stores/chat.ts`)
+
+- Pinia store with refs and computed properties.
+- Persisted state: MQTT config (broker URL, port, topic prefix) and username stored in localStorage.
+- Reactive state: keypair, connection status, messages array, peers Map (using `shallowReactive`), peer public keys Map, typing users Map.
+- MQTT topics computed from `topicPrefix`: `messages`, `typing`, `pubkeys`, `pubkey-request`, `receipts`.
+- Actions for managing messages, receipts, peers, typing indicators, and reconnection.
+
+#### MQTT Communication (`composables/useMqtt.ts`)
+
 - Lifecycle:
-  - On mount: generate ECDH P-256 keypair, export public key, set random username if empty, connect to broker.
-  - Connect: create client with random clientId, subscribe to topics, announce own public key and request others.
-  - Handlers:
-    - `messages`: decrypt per-recipient ciphertext (AES-GCM using derived shared key), add message, send receipt (`received`/`decrypted`).
-    - `typing`: track typing map; import missing public keys; update peer list.
-    - `pubkeys`: import/store peer keys; mark peer secure.
-    - `pubkey-request`: re-announce key.
-    - `receipts`: attach per-user receipt status to sent messages.
+  - Connect: create MQTT client with random clientId, subscribe to topics, announce own public key and request others.
+  - Message handlers validate payloads with Zod schemas before processing:
+    - `messages`: validate, decrypt per-recipient ciphertext (AES-GCM using derived shared key), add message, send receipt (`received`/`decrypted`).
+    - `typing`: validate, track typing map; import missing public keys; update peer list.
+    - `pubkeys`: validate, import/store peer keys; mark peer secure.
+    - `pubkey-request`: validate, re-announce key.
+    - `receipts`: validate, attach per-user receipt status to sent messages.
   - Sending: encrypt plaintext for each known public key + self, publish encrypted payload, append local plaintext message, stop typing.
-  - Typing: throttled publish of typing events; timeout clears.
+  - Typing: throttled publish (1000ms) of typing events; timeout (3000ms) clears indicator.
+  - Disconnect: properly cleans up typing timeouts to prevent memory leaks.
   - Reconnect/change server: end client, clear peer/message state, reconnect.
-- Rendering:
-  - Left: chat header (username edit, E2EE badge, connection badge, server settings, reconnect), scrollable messages with receipts, typing indicator, composer + helper commands.
-  - Right: `<PeerList>` shows peers and key possession, with "Request Keys".
+- Error handling: console errors wrapped in `import.meta.dev` checks for production.
+
+#### Chat Orchestration (`composables/useChat.ts`)
+
+- Initializes store from localStorage.
+- Generates ECDH P-256 keypair on mount, exports public key.
+- Manages MQTT connection lifecycle via `useMqtt`.
+- Provides helper utilities for timestamps, avatar colors, typing text.
+- Handles server config changes and manual key requests.
+
+#### Main UI (`pages/index.vue`)
+
+- Vue SFC using Composition API.
+- Layout:
+  - Header: username edit, E2EE badge, connection badge, server settings, reconnect button.
+  - Main: scrollable messages with receipts, typing indicator, message composer.
+  - Sidebar: `<PeerList>` shows peers and key possession, with "Request Keys" button.
+- Components:
   - `<MessageReceipts>` shows per-message delivery/decrypt counts with tooltip details.
   - `<ServerSettings>` dialog edits broker URL/port/topic prefix and triggers reconnect.
+  - `<PeerList>` displays peer status with key indicators.
 
-### Crypto (`src/lib/crypto.ts`)
+### Crypto (`utils/crypto.ts`)
 
-- ECDH P-256 keypair, export/import SPKI public keys (base64).
-- `deriveSharedKey` -> AES-GCM 256 key per recipient.
-- `encryptMessage` loops recipients, encrypts with random IV, returns base64(iv+ciphertext) map keyed by recipient index (caller maps to public keys).
+- ECDH P-256 keypair generation via WebCrypto API.
+- Export/import SPKI public keys (base64 encoded).
+- `deriveSharedKey` -> AES-GCM 256 key per recipient using ECDH.
+- `encryptMessage` loops recipients, encrypts with random IV, returns base64(iv+ciphertext) array.
 - `decryptMessage` reverses to plaintext with sender pubkey + own private key.
 
-### Hooks
+### Constants (`utils/constants.ts`)
 
-- `useIsMobile` detects viewport < 768px via `matchMedia`.
+- Centralized configuration values:
+  - Typing timeouts: `TYPING_THROTTLE_MS` (1000), `TYPING_TIMEOUT_MS` (3000), `TYPING_EXPIRY_MS` (3000)
+  - Default MQTT config: broker URL, port, topic prefix
+  - localStorage keys
+
+### Validation (`utils/schemas.ts`)
+
+- Zod schemas for all MQTT message types:
+  - `EncryptedMessageSchema`
+  - `TypingEventSchema`
+  - `PublicKeyAnnouncementSchema`
+  - `PublicKeyRequestSchema`
+  - `DeliveryReceiptSchema`
+- Schemas validated with `.safeParse()` before processing incoming messages.
 
 ### Data & State Persistence
 
-- Spark `useKV` stores MQTT server config (`mqtt-server-config`) and username (`mqtt-chat-username`) in KV (see `spark.meta.json` dbType kv).
+- Pinia store persists MQTT server config (`mqtt-server-config`) and username (`mqtt-chat-username`) to localStorage.
+- State automatically loaded on initialization via `loadFromStorage()` action.
 
 ## Commands
 
-- Dev: `bun run dev` (or `npm run dev` if using npm).
-- Build: `bun run build` (tsc project build + `vite build`).
-- Lint: `bun run lint`.
+- Dev: `bun run dev` - Start Nuxt dev server
+- Build: `bun run build` - Build for production
+- Generate: `bun run generate` - Generate static site
+- Preview: `bun run preview` - Preview production build
+- Typecheck: `bun run typecheck` - Run TypeScript type checking
+- Lint: `bun run lint` - Run Trunk linter
+- Format: `bun run format` - Format code with Prettier and Trunk
 
 ## Diagrams
 
@@ -73,15 +122,18 @@ There is a Product Requirements Document in `PRD.md` in the root of the reposito
 id: b31a0c45-fdec-4540-8c79-2704b637428f
 ---
 graph TD
-  Main[src/main.tsx] -->|renders| App
-  App -->|composes| Header[Header bar]
-  App --> Messages[Message list]
-  App --> Composer[Input + send]
-  App --> PeerList
-  App --> ServerSettings
-  App -.-> Crypto[lib/crypto.ts]
-  App -.-> useKV[Spark useKV storage]
-  Messages --> MessageReceipts
+  App[app.vue] -->|uses| Layout[layouts/default.vue]
+  Layout -->|renders| Page[pages/index.vue]
+  Page -->|uses| useChat[composables/useChat.ts]
+  Page -->|uses| useMqtt[composables/useMqtt.ts]
+  Page -->|renders| PeerList[PeerList.vue]
+  Page -->|renders| ServerSettings[ServerSettings.vue]
+  Page -->|renders| MessageReceipts[MessageReceipts.vue]
+  useChat --> Store[stores/chat.ts]
+  useMqtt --> Store
+  useMqtt -.-> Crypto[utils/crypto.ts]
+  useMqtt -.-> Schemas[utils/schemas.ts]
+  Store -.-> localStorage[Browser localStorage]
 ```
 
 ### Message Lifecycle (Publish/Decrypt/Receipts)
@@ -123,11 +175,16 @@ sequenceDiagram
 
 ## Contribution Notes
 
-- Respect minimal state resets on reconnect (`handleServerConfigSave`, `handleReconnect`).
-- Preserve receipt semantics: only upgrade receipt status to `decrypted`.
-- Keep per-peer maps immutable when updating state to avoid stale renders.
-- When adding topics/features, extend both publish and on-message handlers symmetrically.
-- ErrorBoundary rethrows in dev; rely on parent dev tooling for errors.
+- **State management**: Use Pinia store actions for all state mutations; avoid direct mutations.
+- **Map reactivity**: Peer maps use `shallowReactive` for Vue reactivity; use `.set()`, `.delete()`, `.clear()` directly.
+- **Validation**: All incoming MQTT messages must be validated with Zod schemas before processing.
+- **Error handling**: Wrap console logs in `import.meta.dev` checks to prevent logs in production.
+- **Constants**: Use centralized constants from `utils/constants.ts` for magic numbers and config values.
+- **Memory leaks**: Always clean up timers and subscriptions in disconnect/cleanup functions.
+- **Reconnection**: Respect minimal state resets on reconnect (`resetForReconnection`).
+- **Receipt semantics**: Only upgrade receipt status to `decrypted` (never downgrade).
+- **Topics/features**: When adding MQTT topics, extend both publish and handler logic symmetrically.
+- **Type safety**: Maintain strict TypeScript typing; use types from `types/index.ts`.
 
 ---
 
@@ -137,12 +194,13 @@ sequenceDiagram
 - **Primary use case**: Real-time multi-user chat using a public MQTT broker, with typing indicators, peer list/key status, and delivery/decrypt receipts.
 - **Tech stack**:
   - **Runtime**: Browser (WebCrypto + WebSockets)
-  - **Frontend**: React 19 + ReactDOM 19, TypeScript
-  - **Build**: Vite 7, SWC React plugin (`@vitejs/plugin-react-swc`)
-  - **Styling/UI**: Tailwind CSS v4, shadcn/ui (Radix primitives), `tw-animate-css`, icons (Phosphor + Lucide)
+  - **Frontend**: Nuxt 4 + Vue 3 (Composition API), TypeScript
+  - **Build**: Nuxt (built on Vite)
+  - **Styling/UI**: Tailwind CSS v4, custom Vue UI components, `tw-animate-css`
+  - **State management**: Pinia (Vue store) with localStorage persistence
   - **Realtime transport**: `mqtt` npm package connecting to `wss://…` brokers
-  - **Animations**: `framer-motion`
-  - **State persistence**: GitHub Spark KV via `@github/spark/hooks` (`useKV`)
+  - **Validation**: Zod for runtime schema validation
+  - **Utilities**: VueUse for composable utilities
 - **Architecture pattern**: Client-only "event-driven" architecture (MQTT pub/sub). No server/API layer in this repo.
 - **Languages / versions**:
   - **TypeScript**: `~5.9.3`
@@ -163,101 +221,157 @@ sequenceDiagram
 - **Key files**:
   - `trunk.yaml`, `configs/*`: lint configuration files.
 
-### `src/`
+### `pages/`
 
-- **Purpose**: Application source code.
+- **Purpose**: Nuxt pages (file-based routing).
+- **Key files**:
+  - **`index.vue`**: Main chat page with full UI (header, messages, composer, peer list).
+
+### `layouts/`
+
+- **Purpose**: Nuxt layouts.
+- **Key files**:
+  - **`default.vue`**: Default layout wrapping pages.
+
+### `components/`
+
+- **Purpose**: Vue components.
 - **Key areas**:
-  - **Entrypoints**: `main.tsx` (bootstraps React + error boundary)
-  - **Main UI**: `App.tsx` (MQTT connection, key exchange, encryption, UI)
-  - **Domain components**: `components/PeerList.tsx`, `components/ServerSettings.tsx`, `components/MessageReceipts.tsx`
-  - **UI kit**: `components/ui/*` (shadcn/ui components built on Radix)
-  - **Crypto**: `lib/crypto.ts` (ECDH + AES-GCM + base64 helpers)
-  - **Utilities**: `lib/utils.ts` (`cn()` tailwind class combiner)
-  - **Hooks**: `hooks/use-mobile.ts` (`useIsMobile()`)
-  - **Styles**: `main.css`, `index.css`, `styles/theme.css`
+  - **Domain components**: `PeerList.vue`, `ServerSettings.vue`, `MessageReceipts.vue`
+  - **UI kit**: `components/ui/*` (custom Vue UI components with CVA variants)
+
+### `composables/`
+
+- **Purpose**: Vue composables (reusable logic).
+- **Key files**:
+  - **`useChat.ts`**: Chat orchestration (initialization, keypair generation, helpers)
+  - **`useMqtt.ts`**: MQTT client lifecycle and message handlers
+
+### `stores/`
+
+- **Purpose**: Pinia state stores.
+- **Key files**:
+  - **`chat.ts`**: Main chat store (config, keypair, messages, peers, typing)
+
+### `utils/`
+
+- **Purpose**: Utility functions and helpers.
+- **Key files**:
+  - **`crypto.ts`**: ECDH + AES-GCM encryption/decryption
+  - **`schemas.ts`**: Zod validation schemas for MQTT messages
+  - **`constants.ts`**: Centralized constants and configuration values
+  - **`cn.ts`**: Tailwind class combiner utility
+
+### `types/`
+
+- **Purpose**: TypeScript type definitions.
+- **Key files**:
+  - **`index.ts`**: All application types (messages, peers, crypto, etc.)
+
+### `assets/`
+
+- **Purpose**: Static assets and global styles.
+- **Key files**:
+  - **`assets/css/main.css`**: Main Tailwind CSS file with theme variables
 
 ### Root Files
 
-- **`index.html`**: Vite HTML entry, loads `src/main.tsx` and `src/main.css`.
-- **`package.json`**: dependencies, engines, scripts.
-- **`vite.config.ts`**: Vite plugins + `@` alias.
-- **`tailwind.config.js`**: Tailwind v4 config; merges in `theme.json` if present.
-- **`theme.json`**: empty in this repo (hook for custom theme overrides).
-- **`runtime.config.json` / `spark.meta.json`**: GitHub Spark runtime metadata (KV-backed template).
+- **`app.vue`**: Nuxt app root component.
+- **`nuxt.config.ts`**: Nuxt configuration (modules, Tailwind, SSR disabled).
+- **`package.json`**: Dependencies, engines, scripts.
+- **`tsconfig.json`**: TypeScript config extending Nuxt's generated config.
+- **`tailwind.config.js`**: Tailwind v4 configuration.
 
 ## 3. File-by-File Breakdown
 
 ### Core Application Files
 
-- **`index.html`**: Sets the document shell and loads the app entry module.
-- **`src/main.tsx`**:
-  - Imports `@github/spark/spark` (Spark runtime integration).
-  - Mounts `App` under a `react-error-boundary` boundary.
-  - Loads global styles.
-- **`src/App.tsx`**:
-  - Generates a WebCrypto ECDH P-256 keypair on mount.
-  - Connects to an MQTT broker over WebSockets.
-  - Subscribes to topics for messages, typing events, public key announcements, key requests, and receipts.
-  - Maintains in-memory state for:
-    - messages
-    - peers + whether they have a known public key
-    - typing indicators (with timeout expiry)
-    - per-message receipt maps
-  - Uses Spark KV (`useKV`) to persist:
-    - MQTT server config (`mqtt-server-config`)
-    - username (`mqtt-chat-username`)
-- **`src/ErrorFallback.tsx`**:
-  - Rethrows errors in dev (`import.meta.env.DEV`) for better dev UX.
-  - Shows a user-facing error screen in prod.
+- **`app.vue`**: Nuxt app root that uses the default layout.
+- **`layouts/default.vue`**: Default layout wrapper for pages.
+- **`pages/index.vue`**:
+  - Main chat UI component using Vue Composition API.
+  - Renders header, messages, composer, and peer list.
+  - Uses `useChat` and `useMqtt` composables.
+  - Manages auto-scroll and typing indicators.
+- **`composables/useChat.ts`**:
+  - Initializes localStorage and generates ECDH P-256 keypair.
+  - Connects to MQTT broker on mount.
+  - Provides utilities for timestamps, avatar colors, typing text.
+  - Handles server config changes and reconnection.
+- **`composables/useMqtt.ts`**:
+  - MQTT client lifecycle (connect, disconnect, reconnect).
+  - Message handlers with Zod validation for all topics.
+  - Encryption/decryption orchestration.
+  - Typing indicator throttling and timeout management.
+  - Memory leak prevention (clears timers on disconnect).
+- **`stores/chat.ts`**:
+  - Pinia store managing all application state.
+  - Persists config and username to localStorage.
+  - Uses `shallowReactive` Maps for peers, public keys, and typing users.
+  - Provides actions for all state mutations.
 
 ### Configuration Files
 
+- **`nuxt.config.ts`**:
+  - Modules: Tailwind, Pinia, VueUse.
+  - SSR disabled (client-only app).
+  - TypeScript strict mode enabled.
 - **`package.json`**:
-  - Scripts: `dev`, `build`, `preview`, `lint`.
+  - Scripts: `dev`, `build`, `generate`, `preview`, `typecheck`, `lint`, `format`.
   - Engines: Bun + Node.
-  - Notable deps: `mqtt`, `@github/spark`, `next-themes` (installed but not obviously used in the snippets reviewed).
+  - Notable deps: `nuxt`, `vue`, `pinia`, `mqtt`, `zod`, `tailwindcss`.
 - **`tsconfig.json`**:
-  - Bundler resolution, `jsx: react-jsx`, path alias `@/*` → `src/*`.
-- **`vite.config.ts`**:
-  - Plugins: React SWC, Tailwind v4 Vite plugin, Spark Vite plugins.
-  - Alias: `@` → `<projectRoot>/src`.
+  - Extends Nuxt's generated TypeScript configuration.
+  - Strict type checking enabled.
 - **`tailwind.config.js`**:
-  - Uses CSS variables and a Radix-style token palette.
-  - Merges an optional `theme.json` override.
+  - Scans Nuxt/Vue file locations (`components/**`, `layouts/**`, `pages/**`).
+  - Uses CSS variables for theming.
 
 ### Data Layer (Local Persistence)
 
-- **Spark KV** (no local DB/migrations in repo):
-  - `useKV("mqtt-server-config", …)`
-  - `useKV("mqtt-chat-username", …)`
+- **Pinia + localStorage** (no external DB):
+  - `localStorage.getItem("mqtt-server-config")` → server configuration
+  - `localStorage.getItem("mqtt-chat-username")` → username
+  - Loaded on app initialization via `loadFromStorage()` action.
 
 ### Frontend/UI
 
 - **Domain components**:
-  - `src/components/PeerList.tsx`: renders peer list + key status + manual "Request Keys".
-  - `src/components/ServerSettings.tsx`: modal settings for broker URL, port, topic prefix.
-  - `src/components/MessageReceipts.tsx`: small per-message receipt indicator + tooltip.
-- **UI system (`src/components/ui/*`)**:
-  - shadcn/ui style components (Button, Card, Dialog, Input, ScrollArea, Badge, etc.).
-  - Built on Radix primitives + Tailwind utility classes.
+  - `components/PeerList.vue`: Displays peer list with key status and "Request Keys" button.
+  - `components/ServerSettings.vue`: Dialog for editing broker URL, port, topic prefix.
+  - `components/MessageReceipts.vue`: Per-message receipt indicator with tooltip showing per-peer status.
+- **UI system (`components/ui/*`)**:
+  - Custom Vue components using `class-variance-authority` for variants.
+  - Components: Button, Card, Dialog, Input, ScrollArea, Badge, Label, Separator, Tooltip.
+  - Styled with Tailwind utility classes.
 - **Styling**:
-  - `src/main.css`: Tailwind config glue + CSS variables for light/dark + base styles.
-  - `src/index.css`: base layers and font variables.
-  - `src/styles/theme.css`: Spark theming tokens + Radix color imports.
+  - `assets/css/main.css`: Main Tailwind CSS file with theme variables and custom classes.
+
+### Utilities
+
+- **`utils/crypto.ts`**: WebCrypto ECDH + AES-GCM encryption/decryption.
+- **`utils/schemas.ts`**: Zod schemas for validating MQTT messages.
+- **`utils/constants.ts`**: Centralized constants (timeouts, defaults, storage keys).
+- **`utils/cn.ts`**: Tailwind class name combiner (`clsx` + `tailwind-merge`).
+
+### Types
+
+- **`types/index.ts`**: All TypeScript type definitions for the application.
 
 ### Testing
 
-- **No test suite discovered** in this snapshot (no `tests/`, `*.spec.*`, `jest/vitest` config).
+- **No test suite** currently configured (no Vitest or test files).
 
 ### Documentation
 
-- **No `README.md`** found in this worktree.
-- License present: `LICENSE` (MIT).
+- **`CLAUDE.md`**: Comprehensive codebase guide for AI-assisted development.
+- **`PRD.md`**: Product Requirements Document.
+- **License**: `LICENSE` (MIT).
 
 ### DevOps / CI
 
 - **Dependabot** configured under `.github/`.
-- **Trunk** configuration present under `.trunk/`.
+- **Trunk** linting/formatting configuration under `.trunk/`.
 
 ## 4. API Endpoints Analysis
 

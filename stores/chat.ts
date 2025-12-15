@@ -9,12 +9,14 @@ import type {
   SerializedPublicKey,
   ServerConfig,
 } from '~/types'
-
-const DEFAULT_BROKER_URL = 'wss://test.mosquitto.org'
-const DEFAULT_PORT = 8081
-const DEFAULT_TOPIC_PREFIX = 'spark-chat-room'
-const STORAGE_KEY_CONFIG = 'mqtt-server-config'
-const STORAGE_KEY_USERNAME = 'mqtt-chat-username'
+import {
+  DEFAULT_BROKER_URL,
+  DEFAULT_PORT,
+  DEFAULT_TOPIC_PREFIX,
+  STORAGE_KEY_CONFIG,
+  STORAGE_KEY_USERNAME,
+  TYPING_EXPIRY_MS,
+} from '~/utils/constants'
 
 export const useChatStore = defineStore('chat', () => {
   // Persisted state (loaded from localStorage)
@@ -38,12 +40,12 @@ export const useChatStore = defineStore('chat', () => {
   // Message state
   const messages = ref<Message[]>([])
 
-  // Peer state
-  const peers = ref<Map<string, PeerStatus>>(new Map())
-  const peerPublicKeys = ref<Map<string, PeerPublicKey>>(new Map())
+  // Peer state (use shallowReactive for Map reactivity)
+  const peers = shallowReactive(new Map<string, PeerStatus>())
+  const peerPublicKeys = shallowReactive(new Map<string, PeerPublicKey>())
 
-  // Typing state
-  const typingUsers = ref<Map<string, number>>(new Map())
+  // Typing state (use shallowReactive for Map reactivity)
+  const typingUsers = shallowReactive(new Map<string, number>())
 
   // Computed
   const displayUsername = computed(() => {
@@ -134,39 +136,38 @@ export const useChatStore = defineStore('chat', () => {
 
   // Actions - Peers
   function updatePeer(peerStatus: PeerStatus) {
-    peers.value.set(peerStatus.username, peerStatus)
+    peers.set(peerStatus.username, peerStatus)
   }
 
   function setPeerPublicKey(serialized: SerializedPublicKey, key: CryptoKey) {
-    peerPublicKeys.value.set(serialized, { key, serialized })
+    peerPublicKeys.set(serialized, { key, serialized })
   }
 
   function clearPeers() {
-    peers.value.clear()
-    peerPublicKeys.value.clear()
+    peers.clear()
+    peerPublicKeys.clear()
   }
 
   // Actions - Typing
   function setTypingUser(username: string, timestamp: number) {
-    typingUsers.value.set(username, timestamp)
+    typingUsers.set(username, timestamp)
   }
 
   function removeTypingUser(username: string) {
-    typingUsers.value.delete(username)
+    typingUsers.delete(username)
   }
 
   function clearExpiredTypingUsers() {
     const now = Date.now()
-    const TYPING_TIMEOUT = 3000
-    for (const [user, timestamp] of typingUsers.value.entries()) {
-      if (now - timestamp > TYPING_TIMEOUT) {
-        typingUsers.value.delete(user)
+    for (const [user, timestamp] of typingUsers.entries()) {
+      if (now - timestamp > TYPING_EXPIRY_MS) {
+        typingUsers.delete(user)
       }
     }
   }
 
   function clearTypingUsers() {
-    typingUsers.value.clear()
+    typingUsers.clear()
   }
 
   // Reset for reconnection

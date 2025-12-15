@@ -41,16 +41,4 @@ export default defineNuxtConfig({
   },
 
   ssr: false, // Client-only app (MQTT requires browser)
-
-  vite: {
-    resolve: {
-      alias: {
-        '@': '/src', // Keep backwards compatibility during migration
-      },
-    },
-  },
-
-  alias: {
-    '@': '/src',
-  },
 })
