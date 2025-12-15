@@ -70,7 +70,7 @@ export function useMqtt() {
     store.setClientId(clientId)
 
     const mqttClient = mqtt.connect(
-      `${store.serverConfig.brokerUrl}:${store.serverConfig.port}`,
+      `${store.serverConfig.brokerUrl}:${store.serverConfig.port}/mqtt`,
       {
         clientId,
         clean: true,
