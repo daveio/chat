@@ -92,7 +92,7 @@ function handleOpenChange(newOpen: boolean) {
             class="font-mono text-sm"
           />
           <p class="text-xs text-muted-foreground font-mono">
-            WebSocket URL (wss:// or ws://)
+            WebSocket Secure URL (wss://)
           </p>
         </div>
         <div class="space-y-2">
