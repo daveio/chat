@@ -14,6 +14,7 @@ import {
   importPublicKey,
 } from '~/utils/crypto'
 import {
+  MESSAGE_ID_RANDOM_LENGTH,
   TYPING_THROTTLE_MS,
   TYPING_TIMEOUT_MS,
 } from '~/utils/constants'
@@ -30,6 +31,34 @@ export function useMqtt() {
   const client = ref<MqttClient | null>(null)
   const lastTypingEmit = ref(0)
   const typingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
+  const pendingKeyImports = new Set<string>()
+
+  // Import public key with race condition prevention
+  async function importAndStorePeerKey(serializedKey: string): Promise<CryptoKey | null> {
+    // Check if already imported
+    const existing = store.peerPublicKeys.get(serializedKey)
+    if (existing) {
+      return existing.key
+    }
+
+    // Check if import is already in progress
+    if (pendingKeyImports.has(serializedKey)) {
+      // Wait a bit and try again
+      await new Promise(resolve => setTimeout(resolve, 50))
+      return importAndStorePeerKey(serializedKey)
+    }
+
+    // Mark as pending
+    pendingKeyImports.add(serializedKey)
+
+    try {
+      const pubKey = await importPublicKey(serializedKey)
+      store.setPeerPublicKey(serializedKey, pubKey)
+      return pubKey
+    } finally {
+      pendingKeyImports.delete(serializedKey)
+    }
+  }
 
   // Connect to MQTT broker
   async function connect() {
@@ -124,13 +153,14 @@ export function useMqtt() {
         // Import sender's public key if needed
         let senderPublicKey = peerPublicKeys.get(encryptedMsg.senderPublicKey)?.key
         if (!senderPublicKey) {
-          senderPublicKey = await importPublicKey(encryptedMsg.senderPublicKey)
-          store.setPeerPublicKey(encryptedMsg.senderPublicKey, senderPublicKey)
-          store.updatePeer({
-            username: encryptedMsg.username,
-            hasPublicKey: true,
-            lastSeen: Date.now(),
-          })
+          senderPublicKey = await importAndStorePeerKey(encryptedMsg.senderPublicKey)
+          if (senderPublicKey) {
+            store.updatePeer({
+              username: encryptedMsg.username,
+              hasPublicKey: true,
+              lastSeen: Date.now(),
+            })
+          }
         }
 
         // Check if message is encrypted for us
@@ -182,13 +212,14 @@ export function useMqtt() {
           })
 
           if (typingEvent.isTyping && !peerPublicKeys.has(typingEvent.publicKey)) {
-            const pubKey = await importPublicKey(typingEvent.publicKey)
-            store.setPeerPublicKey(typingEvent.publicKey, pubKey)
-            store.updatePeer({
-              username: typingEvent.username,
-              hasPublicKey: true,
-              lastSeen: Date.now(),
-            })
+            const pubKey = await importAndStorePeerKey(typingEvent.publicKey)
+            if (pubKey) {
+              store.updatePeer({
+                username: typingEvent.username,
+                hasPublicKey: true,
+                lastSeen: Date.now(),
+              })
+            }
           }
 
           if (typingEvent.isTyping) {
@@ -214,8 +245,7 @@ export function useMqtt() {
         const announcement: PublicKeyAnnouncement = parsed.data
         if (announcement.username !== displayUsername) {
           if (!peerPublicKeys.has(announcement.publicKey)) {
-            const pubKey = await importPublicKey(announcement.publicKey)
-            store.setPeerPublicKey(announcement.publicKey, pubKey)
+            await importAndStorePeerKey(announcement.publicKey)
           }
           store.updatePeer({
             username: announcement.username,
@@ -348,11 +378,19 @@ export function useMqtt() {
     encryptedByPublicKey[store.myPublicKeyString] = encrypted[recipientKeys.length - 1]
 
     const encryptedMsg: EncryptedMessage = {
-      id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 2 + MESSAGE_ID_RANDOM_LENGTH)}`,
       username: store.displayUsername,
       encrypted: encryptedByPublicKey,
       timestamp: Date.now(),
       senderPublicKey: store.myPublicKeyString,
+    }
+
+    // Check if client is still connected (race condition prevention)
+    if (!client.value) {
+      if (import.meta.dev) {
+        console.error('Client disconnected during message encryption')
+      }
+      return
     }
 
     client.value.publish(

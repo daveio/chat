@@ -124,7 +124,9 @@ export const useChatStore = defineStore('chat', () => {
         message.receipts = new Map()
       }
       const existing = message.receipts.get(receipt.username)
-      if (!existing || receipt.status === 'decrypted') {
+      // Only upgrade status, never downgrade (sent < received < decrypted)
+      const statusOrder = { sent: 0, received: 1, decrypted: 2 }
+      if (!existing || statusOrder[receipt.status] > statusOrder[existing.status]) {
         message.receipts.set(receipt.username, receipt)
       }
     }

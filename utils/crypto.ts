@@ -62,11 +62,11 @@ export async function encryptMessage(
   message: string,
   myPrivateKey: CryptoKey,
   recipientPublicKeys: CryptoKey[],
-): Promise<{ [recipientIndex: number]: string }> {
+): Promise<string[]> {
   const encoder = new TextEncoder()
   const messageData = encoder.encode(message)
 
-  const encrypted: { [recipientIndex: number]: string } = {}
+  const encrypted: string[] = []
 
   for (let i = 0; i < recipientPublicKeys.length; i++) {
     const recipientPublicKey = recipientPublicKeys[i]
@@ -87,7 +87,7 @@ export async function encryptMessage(
     combined.set(iv, 0)
     combined.set(new Uint8Array(ciphertext), iv.length)
 
-    encrypted[i] = arrayBufferToBase64(combined.buffer)
+    encrypted.push(arrayBufferToBase64(combined.buffer))
   }
 
   return encrypted
@@ -119,11 +119,15 @@ export async function decryptMessage(
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer)
-  let binary = ''
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i])
+  const chunks: string[] = []
+  const chunkSize = 0x8000 // Process in 32KB chunks to avoid call stack limits
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length))
+    chunks.push(String.fromCharCode(...chunk))
   }
-  return btoa(binary)
+
+  return btoa(chunks.join(''))
 }
 
 function base64ToArrayBuffer(base64: string): ArrayBuffer {

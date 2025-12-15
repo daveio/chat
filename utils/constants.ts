@@ -11,3 +11,6 @@ export const DEFAULT_TOPIC_PREFIX = 'spark-chat-room'
 // localStorage keys
 export const STORAGE_KEY_CONFIG = 'mqtt-server-config'
 export const STORAGE_KEY_USERNAME = 'mqtt-chat-username'
+
+// Message ID generation
+export const MESSAGE_ID_RANDOM_LENGTH = 7
