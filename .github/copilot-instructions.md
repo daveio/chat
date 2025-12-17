@@ -519,7 +519,7 @@ type DeliveryReceipt = {
 
 ### Module Dependencies
 
-```
+```plaintext
 pages/index.vue
 ├── composables/useChat.ts
 │   ├── stores/chat.ts (Pinia store)
